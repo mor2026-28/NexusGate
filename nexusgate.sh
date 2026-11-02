@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
@@ -126,11 +128,7 @@ change_port() {
   p="${p:-$rand_port}"
   systemctl stop nexusgate.service 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-port "$p"
-  if command -v ufw >/dev/null 2>&1; then ufw allow "${p}/tcp" >/dev/null 2>&1 || true; fi
-  if command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="${p}/tcp" >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
-  fi
+  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   ok "面板端口已更改为: ${p}"
   show_info
@@ -179,7 +177,6 @@ ssl_cert_menu() {
           --fullchain-file "/root/cert/${domain}/fullchain.pem"
         cp -f "/root/cert/${domain}/fullchain.pem" "/etc/nexusgate/certs/${domain}/fullchain.pem"
         cp -f "/root/cert/${domain}/privkey.pem" "/etc/nexusgate/certs/${domain}/privkey.pem"
-        # Stop panel before updating nexusgate.json so running daemon doesn't overwrite it!
         systemctl stop nexusgate.service 2>/dev/null || true
         rm -rf /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
         NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-cert "/root/cert/${domain}/fullchain.pem" "/root/cert/${domain}/privkey.pem" "$domain"
@@ -353,39 +350,50 @@ EOF
 
 firewall_menu() {
   need_root
-  echo -e "${cyan}---------------- 防火墙端口管理 ----------------${plain}"
+  echo -e "${cyan}---------------- 防火墙端口管理 (支持 Debian/Ubuntu/CentOS 全系统) ----------------${plain}"
   echo -e "  ${green}1.${plain} 一键自动放行面板端口与所有 Sing-box 节点端口"
   echo -e "  ${green}2.${plain} 手动放行指定端口 (TCP + UDP)"
-  echo -e "  ${green}3.${plain} 查看当前防火墙状态"
+  echo -e "  ${green}3.${plain} 查看当前防火墙状态与监听端口"
   echo -e "  ${green}0.${plain} 返回主菜单"
   local f=""
   read -r -p "请选择 [0-3]: " f </dev/tty
   case "$f" in
     1)
-      python3 - "$DATA_FILE" <<'PY'
-import json, subprocess, sys
-d = json.load(open(sys.argv[1]))
-ports = [d.get("settings", {}).get("webPort", 2053)] + [i.get("port") for i in d.get("inbounds", []) if i.get("port")]
-for p in set(ports):
-    subprocess.run(["ufw", "allow", f"{p}/tcp"], capture_output=True)
-    subprocess.run(["ufw", "allow", f"{p}/udp"], capture_output=True)
-    subprocess.run(["iptables", "-I", "INPUT", "-p", "tcp", "--dport", str(p), "-j", "ACCEPT"], capture_output=True)
-    subprocess.run(["iptables", "-I", "INPUT", "-p", "udp", "--dport", str(p), "-j", "ACCEPT"], capture_output=True)
-print("已放行端口:", sorted(list(set(ports))))
-PY
-      ok "面板与节点端口已全部放行！"
+      NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall
+      ok "面板与所有节点端口已全部放行！"
       ;;
     2)
       local mp=""
       read -r -p "请输入要放行的端口号: " mp </dev/tty
-      ufw allow "${mp}/tcp" 2>/dev/null || true
-      ufw allow "${mp}/udp" 2>/dev/null || true
-      iptables -I INPUT -p tcp --dport "$mp" -j ACCEPT 2>/dev/null || true
-      iptables -I INPUT -p udp --dport "$mp" -j ACCEPT 2>/dev/null || true
+      if command -v ufw >/dev/null 2>&1; then
+        ufw allow "${mp}/tcp" >/dev/null 2>&1 || true
+        ufw allow "${mp}/udp" >/dev/null 2>&1 || true
+      fi
+      if command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-port="${mp}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-port="${mp}/udp" >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
+      fi
+      if command -v iptables >/dev/null 2>&1; then
+        iptables -C INPUT -p tcp --dport "$mp" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$mp" -j ACCEPT 2>/dev/null || true
+        iptables -C INPUT -p udp --dport "$mp" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$mp" -j ACCEPT 2>/dev/null || true
+      fi
       ok "端口 ${mp} (TCP+UDP) 已放行"
       ;;
     3)
-      ufw status 2>/dev/null || iptables -L -n 2>/dev/null | head -n 30 || true
+      echo -e "${cyan}--- 1. 防火墙规则状态 ---${plain}"
+      if command -v ufw >/dev/null 2>&1; then
+        ufw status verbose || true
+      elif command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --list-all || true
+      elif command -v iptables >/dev/null 2>&1; then
+        iptables -L INPUT -n --line-numbers | head -n 30 || true
+      else
+        echo "当前系统未安装额外主机防火墙拦截器 (默认全端口直通)"
+      fi
+      echo ""
+      echo -e "${cyan}--- 2. 当前本机正在监听的面板与 Sing-box 节点端口 ---${plain}"
+      ss -tulnp 2>/dev/null | grep -E "sing-box|node|Local" || ss -tuln 2>/dev/null | head -n 25 || true
       ;;
   esac
 }
@@ -393,7 +401,7 @@ PY
 ip_limit_menu() {
   need_root
   echo -e "${cyan}---------------- IP 与设备数量限制 / Fail2ban 管理 ----------------${plain}"
-  echo -e "  • 节点客户端同时在线 IP / 设备数限制：可在 Web 面板【入站节点管理 -> 编辑节点】中直接设置【限制同时在线 IP / 设备数 (limitIp)】，超出数量的新 IP 连接会被实时自动断开。"
+  echo -e "  • 节点同时在线公网 IP 数限制 (limitIp) 与同时在线设备数限制 (limitDevice)：可在 Web 面板【入站节点管理 -> 编辑节点】中分别独立设置，超出数量的新连接会被实时自动断开。"
   echo -e "  ${green}1.${plain} 安装并启用 SSH 与面板防爆破组件 (Fail2ban)"
   echo -e "  ${green}2.${plain} 查看 Fail2ban 状态"
   echo -e "  ${green}0.${plain} 返回主菜单"
@@ -410,7 +418,7 @@ ip_limit_menu() {
 
 update_geo_files() {
   need_root
-  info "正在更新 Sing-box GeoIP / Geosite 分流规则集缓存..."
+  info "正在更新 Sing-box 本地 GeoIP / Geosite 规则集文件..."
   mkdir -p /etc/nexusgate/sing-box/rulesets
   curl -fL --retry 2 "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs" -o /etc/nexusgate/sing-box/rulesets/geosite-cn.srs || true
   curl -fL --retry 2 "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs" -o /etc/nexusgate/sing-box/rulesets/geoip-cn.srs || true
@@ -466,6 +474,7 @@ migrate_3xui() {
   db_path="${db_path:-$default_db}"
   systemctl stop nexusgate.service 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --migrate-3xui "$db_path" merge
+  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
 }
@@ -482,11 +491,12 @@ update_panel() {
   install -m 0755 "$INSTALL_DIR/nexusgate.sh" /usr/local/bin/nexusgate
   ln -sf /usr/local/bin/nexusgate /usr/local/bin/ng
   rm -rf -- "$tmp" /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
-  # Trigger cert discovery & UUID auto-repair before restarting
-  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --show-info >/dev/null || true
+  # Trigger cert discovery, Reality config fix, and firewall port opening before restarting
+  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --issue-selfsigned >/dev/null 2>&1 || true
+  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
-  ok "NexusGate 面板与管理脚本已更新至 v2.2，并已自动绑定已申请的域名证书！"
+  ok "NexusGate 面板与管理脚本已更新至 v2.3，所有节点与 Sing-box 内核已重新加载生效！"
   show_info
 }
 
@@ -503,99 +513,102 @@ uninstall_panel() {
   exit 0
 }
 
-menu() {
-  while true; do
-    clear || true
-    echo -e "${green}NexusGate · 枢门 Sing-box 轻量中转管理脚本 v2.2${plain}"
-    echo -e "${green}一个融合 NexusGate UI 与 3x-ui 核心能力的轻量面板${plain}"
-    echo -e "————————————————————————————————————————————————"
-    echo -e "  ${green}0.${plain} 退出脚本"
-    echo -e "  ${green}1.${plain} 安装 / 重装面板"
-    echo -e "  ${green}2.${plain} 更新面板"
-    echo -e "  ${green}3.${plain} 更新管理菜单脚本"
-    echo -e "  ${green}4.${plain} 自定义 / 切换 Sing-box 内核版本"
-    echo -e "  ${green}5.${plain} 卸载面板"
-    echo -e "————————————————————————————————————————————————"
-    echo -e "  ${green}6.${plain} 重置用户名、密码 (默认生成18位高强度密码)"
-    echo -e "  ${green}7.${plain} 修改访问路径 (默认生成16位随机安全路径)"
-    echo -e "  ${green}8.${plain} 重置面板设置 (恢复默认端口与路径)"
-    echo -e "  ${green}9.${plain} 修改面板端口"
-    echo -e "  ${green}10.${plain} 查看当前面板设置 (完整登录链接/账号/端口)"
-    echo -e "————————————————————————————————————————————————"
-    echo -e "  ${green}11.${plain} 启动面板与 Sing-box"
-    echo -e "  ${green}12.${plain} 关闭面板与 Sing-box"
-    echo -e "  ${green}13.${plain} 重启面板与 Sing-box"
-    echo -e "  ${green}14.${plain} 检查面板与 Sing-box 状态"
-    echo -e "  ${green}15.${plain} 查看面板与 Sing-box 日志"
-    echo -e "————————————————————————————————————————————————"
-    echo -e "  ${green}16.${plain} 启用开机自启"
-    echo -e "  ${green}17.${plain} 禁用开机自启"
-    echo -e "————————————————————————————————————————————————"
-    echo -e "  ${green}18.${plain} SSL 证书管理 (自动绑定面板与节点 / ACME / IP证书 / 自签)"
-    echo -e "  ${green}19.${plain} Cloudflare SSL 证书 (CF DNS API 申请)"
-    echo -e "  ${green}20.${plain} IP 设备限制与防爆破管理"
-    echo -e "  ${green}21.${plain} 防火墙端口管理"
-    echo -e "————————————————————————————————————————————————"
-    echo -e "  ${green}22.${plain} 启用 BBR + FQ / HY2 UDP 高速内核加速"
-    echo -e "  ${green}23.${plain} 更新 Geo 分流规则文件"
-    echo -e "  ${green}24.${plain} Speedtest 测速工具"
-    echo -e "  ${green}25.${plain} 一键无损迁移 3x-ui 全部节点与中转 (x-ui.db / 备份包)"
-    echo -e "————————————————————————————————————————————————"
-    echo -e "面板状态: $(panel_status_text)"
-    echo -e "开机启动: $(autostart_status_text)"
-    echo -e "内核状态: $(singbox_status_text)"
-    echo -e "网络加速: $(bbr_status_text)"
-    echo ""
-    read -r -p "请输入选项 [0-25]: " num </dev/tty
-    case "$num" in
-      0) exit 0 ;;
-      1) bash "$INSTALL_DIR/install.sh"; pause_return ;;
-      2) update_panel; pause_return ;;
-      3) update_panel; pause_return ;;
-      4) switch_singbox_version; pause_return ;;
-      5) uninstall_panel ;;
-      6) change_account; pause_return ;;
-      7) change_path; pause_return ;;
-      8) reset_settings; pause_return ;;
-      9) change_port; pause_return ;;
-      10) show_info; pause_return ;;
-      11) systemctl start nexusgate.service nexusgate-singbox.service && ok "面板与 Sing-box 已启动"; pause_return ;;
-      12) systemctl stop nexusgate.service nexusgate-singbox.service && ok "面板与 Sing-box 已关闭"; pause_return ;;
-      13) systemctl restart nexusgate.service nexusgate-singbox.service && ok "面板与 Sing-box 已重启"; pause_return ;;
-      14) systemctl status nexusgate.service nexusgate-singbox.service --no-pager || true; pause_return ;;
-      15) journalctl -u nexusgate.service -u nexusgate-singbox.service -n 80 --no-pager || true; pause_return ;;
-      16) systemctl enable nexusgate.service nexusgate-singbox.service && ok "已启用开机自启"; pause_return ;;
-      17) systemctl disable nexusgate.service nexusgate-singbox.service && ok "已禁用开机自启"; pause_return ;;
-      18) ssl_cert_menu ;;
-      19) cf_ssl_cert; pause_return ;;
-      20) ip_limit_menu; pause_return ;;
-      21) firewall_menu; pause_return ;;
-      22) bbr_menu ;;
-      23) update_geo_files; pause_return ;;
-      24) run_speedtest; pause_return ;;
-      25) migrate_3xui; pause_return ;;
-      *) warn "请输入正确的数字 [0-25]"; sleep 1 ;;
-    esac
-  done
+show_menu() {
+  clear 2>/dev/null || true
+  echo -e "
+  ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
+  ${cyan}║${plain}     ${green}NexusGate · 枢门 Sing-box 轻量中转面板管理脚本 (v2.3)${plain}      ${cyan}║${plain}
+  ${cyan}║${plain}     ${yellow}3x-ui 全功能命令体验 · BBR+FQ+HY2 加速 · ACME 证书联动${plain}     ${cyan}║${plain}
+  ${cyan}╚════════════════════════════════════════════════════════════════╝${plain}
+  ${green}0.${plain} 退出脚本
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ${green}1.${plain} 安装面板
+  ${green}2.${plain} 更新面板 (从 GitHub 拉取最新代码并自动修复重启)
+  ${green}3.${plain} 备份 / 导出面板数据
+  ${green}4.${plain} 自定义 / 切换 Sing-box 内核版本
+  ${green}5.${plain} 卸载面板
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ${green}6.${plain} 重置用户名、密码 (默认生成18位高强度密码)
+  ${green}7.${plain} 修改访问路径 (默认生成16位随机安全路径)
+  ${green}8.${plain} 重置面板设置 (恢复默认端口与路径)
+  ${green}9.${plain} 修改面板端口
+  ${green}10.${plain} 查看当前面板设置 (完整登录链接/账号/端口)
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ${green}11.${plain} 启动面板与 Sing-box
+  ${green}12.${plain} 关闭面板与 Sing-box
+  ${green}13.${plain} 重启面板与 Sing-box
+  ${green}14.${plain} 检查面板与 Sing-box 状态
+  ${green}15.${plain} 查看面板与 Sing-box 日志
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ${green}16.${plain} 启用开机自启
+  ${green}17.${plain} 禁用开机自启
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ${green}18.${plain} SSL 证书管理 (自动绑定面板与节点 / ACME / IP证书 / 自签)
+  ${green}19.${plain} Cloudflare SSL 证书 (CF DNS API 申请)
+  ${green}20.${plain} IP 与设备数限制 / 防爆破管理
+  ${green}21.${plain} 防火墙端口管理 (自动放行面板与所有节点端口)
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ${green}22.${plain} 启用 BBR + FQ / HY2 UDP 高速内核加速
+  ${green}23.${plain} 更新 Geo 分流规则文件
+  ${green}24.${plain} Speedtest 测速工具
+  ${green}25.${plain} 一键无损迁移 3x-ui 全部节点与中转 (x-ui.db / 备份包)
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  面板状态: $(panel_status_text)
+  开机启动: $(autostart_status_text)
+  内核状态: $(singbox_status_text)
+  网络加速: $(bbr_status_text)
+"
+  local choice=""
+  read -r -p "请输入选项 [0-25]: " choice </dev/tty || exit 0
+  case "$choice" in
+    0) exit 0 ;;
+    1) bash "$INSTALL_DIR/install.sh" ;;
+    2) update_panel ; pause_return ;;
+    3) cp -f "$DATA_FILE" "/root/nexusgate-backup-$(date +%F).json" && ok "已备份至 /root/nexusgate-backup-$(date +%F).json" ; pause_return ;;
+    4) switch_singbox_version ; pause_return ;;
+    5) uninstall_panel ;;
+    6) change_account ; pause_return ;;
+    7) change_path ; pause_return ;;
+    8) reset_settings ; pause_return ;;
+    9) change_port ; pause_return ;;
+    10) show_info ; pause_return ;;
+    11) systemctl start nexusgate.service nexusgate-singbox.service && ok "已启动" ; pause_return ;;
+    12) systemctl stop nexusgate.service nexusgate-singbox.service && ok "已停止" ; pause_return ;;
+    13) systemctl restart nexusgate.service nexusgate-singbox.service && ok "已重启" ; pause_return ;;
+    14) systemctl status nexusgate.service nexusgate-singbox.service --no-pager || true ; pause_return ;;
+    15) journalctl -u nexusgate.service -u nexusgate-singbox.service -n 80 --no-pager || true ; pause_return ;;
+    16) systemctl enable nexusgate.service nexusgate-singbox.service && ok "已启用开机自启" ; pause_return ;;
+    17) systemctl disable nexusgate.service nexusgate-singbox.service && ok "已禁用开机自启" ; pause_return ;;
+    18) ssl_cert_menu ;;
+    19) cf_ssl_cert ; pause_return ;;
+    20) ip_limit_menu ; pause_return ;;
+    21) firewall_menu ; pause_return ;;
+    22) bbr_menu ;;
+    23) update_geo_files ; pause_return ;;
+    24) run_speedtest ; pause_return ;;
+    25) migrate_3xui ; pause_return ;;
+    *) warn "请输入有效数字 [0-25]" ; sleep 1 ;;
+  esac
 }
 
-case "${1:-menu}" in
-  info|status|settings) show_info ;;
-  account) change_account ;;
-  port) change_port ;;
-  path) change_path ;;
-  reset) reset_settings ;;
-  cert|ssl) ssl_cert_menu ;;
-  cf-cert) cf_ssl_cert ;;
-  bbr) bbr_menu ;;
-  firewall) firewall_menu ;;
-  version) switch_singbox_version ;;
-  migrate) migrate_3xui ;;
-  start) systemctl start nexusgate.service nexusgate-singbox.service ;;
-  restart) systemctl restart nexusgate.service nexusgate-singbox.service ;;
-  stop) systemctl stop nexusgate.service nexusgate-singbox.service ;;
-  logs|log) journalctl -u nexusgate.service -u nexusgate-singbox.service -n 100 --no-pager ;;
-  update) update_panel ;;
-  uninstall) uninstall_panel ;;
-  *) menu ;;
-esac
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    start) systemctl start nexusgate.service nexusgate-singbox.service ;;
+    stop) systemctl stop nexusgate.service nexusgate-singbox.service ;;
+    restart) systemctl restart nexusgate.service nexusgate-singbox.service ;;
+    status) systemctl status nexusgate.service nexusgate-singbox.service --no-pager ;;
+    info|settings) show_info ;;
+    log|logs) journalctl -u nexusgate.service -u nexusgate-singbox.service -n 100 --no-pager ;;
+    bbr) bbr_menu ;;
+    cert|ssl) ssl_cert_menu ;;
+    firewall|fw) NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall ;;
+    migrate) migrate_3xui ;;
+    update) update_panel ;;
+    uninstall) uninstall_panel ;;
+    *) show_menu ;;
+  esac
+else
+  while true; do
+    show_menu
+  done
+fi

@@ -23,14 +23,17 @@ const {
   INBOUND_PROTOCOLS,
   OUTBOUND_PROTOCOLS,
   ensureUuid,
+  normalizeSsMethod,
+  isCertFileSelfSigned,
   generateRealityKeypair,
   deriveRealityPublicKey,
   generateSsKey,
   generateShortId,
+  toSingboxOutbound,
   buildClientLinks,
   parseShareUriToOutbound
 } = require('./lib/protocols');
-const { KNOWN_VERSIONS, buildSingboxConfig, SingboxManager } = require('./lib/singbox');
+const { KNOWN_VERSIONS, computeResetCycleKey, buildSingboxConfig, SingboxManager } = require('./lib/singbox');
 const {
   getSystemStatus,
   applyKernelAcceleration,
@@ -45,7 +48,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '2.2.0';
+const VERSION = '2.3.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -55,17 +58,23 @@ const sessions = new SessionManager(24);
 sessions.setMaxAgeMinutes(store.state.settings.sessionMaxAge || 720);
 const singbox = new SingboxManager(store);
 const loginAttempts = new Map();
+let activeServer = null;
 
 function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes = true) {
-  // Remove legacy www.bing.com certs or duplicate entries
-  st.certificates = (st.certificates || []).filter(
-    (c) => c.domain !== 'www.bing.com' && c.domain !== cert.domain && c.certPath !== cert.certPath
-  );
+  const isRealAcme = cert.type !== 'self-signed' && !cert.isSelfSigned;
+  st.certificates = (st.certificates || []).filter((c) => {
+    if (c.domain === 'www.bing.com') return false;
+    if (c.domain === cert.domain || c.certPath === cert.certPath) return false;
+    // Once a real ACME certificate is bound, remove leftover fallback self-signed certs so only real certs remain
+    if (isRealAcme && (c.type === 'self-signed' || c.isSelfSigned)) return false;
+    return true;
+  });
   st.certificates.unshift(cert);
+
   if (applyToPanel) {
     st.settings.webCertFile = cert.certPath;
     st.settings.webKeyFile = cert.keyPath;
-    if (cert.type !== 'self-signed' && cert.domain && cert.domain !== 'www.apple.com') {
+    if (isRealAcme && cert.domain && cert.domain !== 'www.apple.com') {
       st.settings.webDomain = cert.domain;
     }
   }
@@ -74,10 +83,16 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
     st.settings.defaultCertFile = cert.certPath;
     st.settings.defaultKeyFile = cert.keyPath;
     for (const inb of st.inbounds || []) {
-      if (inb.security === 'tls' && (!inb.certPath || inb.certPath.includes('selfsigned') || inb.certPath.includes('www.bing.com') || inb.tlsDomain === 'www.bing.com' || inb.tlsDomain === 'www.apple.com')) {
-        inb.tlsDomain = cert.domain;
-        inb.certPath = cert.certPath;
-        inb.keyPath = cert.keyPath;
+      if (inb.security === 'reality') {
+        delete inb.certPath;
+        delete inb.keyPath;
+      } else if (inb.security === 'tls') {
+        const inbCertSelf = !inb.certPath || isCertFileSelfSigned(inb.certPath);
+        if (inbCertSelf || inb.tlsDomain === 'www.bing.com' || inb.tlsDomain === 'www.apple.com') {
+          inb.tlsDomain = cert.domain;
+          inb.certPath = cert.certPath;
+          inb.keyPath = cert.keyPath;
+        }
       }
     }
   }
@@ -90,15 +105,20 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
 function syncDiscoveredCerts() {
   const discovered = discoverSystemCertificates();
   let changed = false;
+  const prevPanelCert = store.state.settings.webCertFile || '';
 
-  // Purge any old www.bing.com self-signed cert from state
   const beforeLen = store.state.certificates.length;
   store.state.certificates = store.state.certificates.filter((c) => c.domain !== 'www.bing.com');
   if (store.state.certificates.length !== beforeLen) changed = true;
 
   for (const d of discovered) {
-    const exists = store.state.certificates.some((c) => c.certPath === d.certPath || c.domain === d.domain);
-    if (!exists) {
+    const existingIdx = store.state.certificates.findIndex((c) => c.certPath === d.certPath || c.domain === d.domain);
+    if (existingIdx >= 0) {
+      if (store.state.certificates[existingIdx].type === 'self-signed' && d.type !== 'self-signed') {
+        store.state.certificates[existingIdx] = d;
+        changed = true;
+      }
+    } else {
       if (d.type !== 'self-signed') {
         store.state.certificates.unshift(d);
       } else {
@@ -108,12 +128,15 @@ function syncDiscoveredCerts() {
     }
   }
 
-  // If a real ACME/custom domain certificate exists, and current panel/node cert is empty or self-signed, auto-bind the real cert!
-  const bestRealCert = store.state.certificates.find((c) => c.type !== 'self-signed' && c.valid !== false);
+  const bestRealCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
   if (bestRealCert) {
     const curCert = store.state.settings.webCertFile || '';
-    const isCurSelfSigned = !curCert || curCert.includes('selfsigned') || curCert.includes('www.bing.com') || curCert.includes('www.apple.com');
-    if (isCurSelfSigned || store.state.settings.defaultTlsDomain === 'www.bing.com' || store.state.settings.defaultTlsDomain === 'www.apple.com') {
+    const isCurSelfSigned = !curCert || isCertFileSelfSigned(curCert);
+    if (
+      isCurSelfSigned ||
+      store.state.settings.defaultTlsDomain !== bestRealCert.domain ||
+      store.state.certificates.some((c) => c.type === 'self-signed')
+    ) {
       bindCertificateEverywhere(store.state, bestRealCert, true, true);
       changed = true;
     }
@@ -125,7 +148,12 @@ function syncDiscoveredCerts() {
     changed = true;
   }
 
-  if (changed) store.save();
+  if (changed) {
+    store.save();
+    if (activeServer && store.state.settings.webCertFile && store.state.settings.webCertFile !== prevPanelCert) {
+      setTimeout(() => restartPanelServer(), 200);
+    }
+  }
 }
 
 syncDiscoveredCerts();
@@ -140,10 +168,9 @@ function syncInboundRelayToRoutingRule(st, inbound) {
   if (!st.routing) st.routing = { final: 'direct', rules: [] };
   if (!Array.isArray(st.routing.rules)) st.routing.rules = [];
 
-  // Find existing pure 1-to-1 relay rule for this inbound tag
   const existingIdx = st.routing.rules.findIndex(
     (r) => Array.isArray(r.inbound) && r.inbound.length === 1 && r.inbound[0] === inbound.tag &&
-      !r.domain?.length && !r.domain_suffix?.length && !r.ip_cidr?.length && !r.port?.length && !r.protocol?.length
+      !r.domain?.length && !r.domain_suffix?.length && !r.ip_cidr?.length && !r.port?.length && !r.protocol?.length && !r.ip_is_private
   );
 
   if (inbound.outboundTag && inbound.outboundTag !== 'default') {
@@ -170,7 +197,6 @@ function syncInboundRelayToRoutingRule(st, inbound) {
     if (existingIdx >= 0) {
       st.routing.rules[existingIdx] = relayRule;
     } else {
-      // Insert right after sniff rule so inbound relay rules sit at the top like 3x-ui
       const sniffIdx = st.routing.rules.findIndex((r) => r.action === 'sniff');
       st.routing.rules.splice(sniffIdx + 1, 0, relayRule);
     }
@@ -269,8 +295,7 @@ function handleCliCommand(args) {
   if (cmd === '--issue-selfsigned') {
     const domain = String(args[1] || store.state.settings.webDomain || 'www.apple.com').trim();
     const ip = String(args[2] || store.state.settings.publicIPv4 || '').trim();
-    // If a real ACME cert already exists, prefer keeping it unless forced
-    const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && c.valid !== false);
+    const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
     if (realCert && args[3] !== '--force') {
       store.transact((st) => {
         bindCertificateEverywhere(st, realCert, true, true);
@@ -308,6 +333,15 @@ function handleCliCommand(args) {
     console.log(certFile ? `SSL 证书已成功绑定至面板与全部 TLS 节点: ${certFile}` : '已关闭面板 HTTPS，恢复为 HTTP 访问');
     return;
   }
+  if (cmd === '--open-firewall') {
+    const ports = [
+      store.state.settings.webPort,
+      ...(store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port)
+    ];
+    const res = openFirewallPorts(ports);
+    console.log(`已自动放行端口: ${res.openedPorts.join(', ')}`);
+    return;
+  }
   if (cmd === '--migrate-3xui') {
     const dbPath = args[1] || '/etc/x-ui/x-ui.db';
     const mode = args[2] || 'merge';
@@ -317,6 +351,18 @@ function handleCliCommand(args) {
     console.log(`成功从 ${dbPath} 无损迁移: 入站 ${rec.inboundsCount} 个 (${rec.clientsCount} 客户端), 出站 ${rec.outboundsCount} 个, 分流规则 ${rec.rulesCount} 条`);
     return;
   }
+}
+
+function parseExpiryTimeInput(rawVal, fallback = 0) {
+  if (rawVal === undefined || rawVal === null) return fallback;
+  const s = String(rawVal).trim();
+  if (!s || s === '0') return 0;
+  if (/^\d+$/.test(s)) {
+    const num = Number(s);
+    return num > 0 ? num : 0;
+  }
+  const ts = Date.parse(s);
+  return Number.isFinite(ts) && ts > 0 ? ts : 0;
 }
 
 function normalizeInboundPayload(body, existing = null) {
@@ -331,11 +377,19 @@ function normalizeInboundPayload(body, existing = null) {
   const tag = String(body.tag || existing?.tag || `inbound-${port}`).trim();
   const remark = String(body.remark || existing?.remark || `${protocol.toUpperCase()}-${port}`).trim();
   const listen = String(body.listen || existing?.listen || '::').trim();
+  const publicHost = String(body.publicHost ?? existing?.publicHost ?? '').trim();
   const enable = body.enable !== undefined ? Boolean(body.enable) : (existing ? existing.enable !== false : true);
   const outboundTag = String(body.outboundTag ?? existing?.outboundTag ?? 'default').trim();
+
+  // Separate Online IP Limit (limitIp) and Online Device Limit (limitDevice)
   const limitIp = Math.max(0, Number(body.limitIp ?? existing?.limitIp ?? 0));
-  const totalGB = Math.max(0, Number(body.totalGB ?? (existing?.total ? Math.round(existing.total / (1024 ** 3)) : 0)));
-  const total = body.total !== undefined ? Number(body.total) : (totalGB > 0 ? totalGB * (1024 ** 3) : 0);
+  const limitDevice = Math.max(0, Number(body.limitDevice ?? existing?.limitDevice ?? 0));
+
+  // Total Traffic Quota (GB / Bytes) & Monthly Auto Reset Day (1..31, 0 = disabled) & Expiry Time
+  const totalGB = Math.max(0, Number(body.totalGB ?? (existing?.total ? Math.round((existing.total / (1024 ** 3)) * 100) / 100 : 0)));
+  const total = body.total !== undefined ? Number(body.total) : (totalGB > 0 ? Math.round(totalGB * (1024 ** 3)) : 0);
+  const expiryTime = parseExpiryTimeInput(body.expiryTime, existing?.expiryTime || 0);
+  const resetDay = Math.max(0, Math.min(31, Math.floor(Number(body.resetDay ?? existing?.resetDay ?? 0))));
 
   let security = String(body.security ?? existing?.security ?? 'none').toLowerCase();
   if (['anytls', 'hysteria2', 'tuic'].includes(protocol)) {
@@ -350,15 +404,19 @@ function normalizeInboundPayload(body, existing = null) {
     protocol,
     listen,
     port,
+    ...(publicHost ? { publicHost } : {}),
     enable,
     security,
     transport,
     outboundTag,
     limitIp,
+    limitDevice,
     up: Number(body.up ?? existing?.up ?? 0),
     down: Number(body.down ?? existing?.down ?? 0),
     total,
-    expiryTime: Number(body.expiryTime ?? existing?.expiryTime ?? 0),
+    expiryTime,
+    resetDay,
+    lastResetCycle: resetDay > 0 ? (existing?.lastResetCycle || computeResetCycleKey(resetDay)) : '',
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -394,7 +452,7 @@ function normalizeInboundPayload(body, existing = null) {
   }
 
   if (security === 'tls') {
-    const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && c.valid !== false);
+    const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
     const defDomain = realCert?.domain || store.state.settings.webDomain || store.state.settings.defaultTlsDomain || 'www.apple.com';
     const defCert = realCert?.certPath || store.state.settings.defaultCertFile || store.state.settings.webCertFile || '';
     const defKey = realCert?.keyPath || store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || '';
@@ -421,7 +479,7 @@ function normalizeInboundPayload(body, existing = null) {
   if (protocol === 'vless') {
     inbound.flow = String(body.flow ?? existing?.flow ?? (security === 'reality' && transport === 'tcp' ? 'xtls-rprx-vision' : '')).trim();
   } else if (protocol === 'shadowsocks') {
-    inbound.method = String(body.method || existing?.method || '2022-blake3-aes-128-gcm').trim();
+    inbound.method = normalizeSsMethod(body.method || existing?.method || '2022-blake3-aes-128-gcm');
     inbound.password = String(body.password || existing?.password || generateSsKey(inbound.method)).trim();
     inbound.network = String(body.network || existing?.network || 'tcp,udp').trim();
   } else if (protocol === 'hysteria2') {
@@ -431,7 +489,7 @@ function normalizeInboundPayload(body, existing = null) {
     inbound.obfsPassword = String(body.obfsPassword ?? existing?.obfsPassword ?? '').trim();
   } else if (protocol === 'anytls') {
     inbound.password = String(body.password || existing?.password || randomString(20)).trim();
-  } else if (protocol === 'socks') {
+  } else if (protocol === 'socks' || protocol === 'mixed' || protocol === 'http') {
     inbound.socksUser = String(body.socksUser ?? existing?.socksUser ?? `user_${randomString(6)}`).trim();
     inbound.socksPassword = String(body.socksPassword ?? existing?.socksPassword ?? randomString(16)).trim();
   } else if (protocol === 'trojan') {
@@ -445,7 +503,6 @@ function normalizeInboundPayload(body, existing = null) {
     inbound.network = String(body.network ?? existing?.network ?? 'tcp,udp').trim();
   }
 
-  // Strictly ensure valid UUIDs for VLESS/VMess/TUIC clients!
   if (Array.isArray(body.clients) && body.clients.length > 0) {
     inbound.clients = body.clients.map((c, i) => ({
       id: ensureUuid(c.id || c.uuid),
@@ -455,10 +512,11 @@ function normalizeInboundPayload(body, existing = null) {
       flow: c.flow !== undefined ? c.flow : (inbound.flow || ''),
       subId: String(c.subId || randomString(12)).trim(),
       limitIp: Number(c.limitIp ?? inbound.limitIp ?? 0),
-      totalGB: Number(c.totalGB || 0),
+      limitDevice: Number(c.limitDevice ?? inbound.limitDevice ?? 0),
+      totalGB: Number(c.totalGB || totalGB || 0),
       up: Number(c.up || 0),
       down: Number(c.down || 0),
-      expiryTime: Number(c.expiryTime || 0),
+      expiryTime: Number(c.expiryTime || expiryTime || 0),
       enable: c.enable !== false
     }));
   } else if (existing?.clients?.length && !body.resetClients) {
@@ -466,11 +524,14 @@ function normalizeInboundPayload(body, existing = null) {
       ...c,
       id: ensureUuid(idx === 0 && body.uuid ? body.uuid : c.id),
       email: idx === 0 && body.clientEmail ? body.clientEmail : c.email,
+      username: ['socks', 'mixed', 'http'].includes(inbound.protocol) && inbound.socksUser ? inbound.socksUser : c.username,
       limitIp: inbound.limitIp,
+      limitDevice: inbound.limitDevice,
+      expiryTime: inbound.expiryTime,
       flow: inbound.protocol === 'vless' ? (inbound.flow ?? c.flow ?? '') : c.flow,
       password: ['anytls', 'hysteria2', 'trojan', 'shadowsocks', 'tuic'].includes(inbound.protocol) && inbound.password
         ? inbound.password
-        : c.password
+        : (['socks', 'mixed', 'http'].includes(inbound.protocol) && inbound.socksPassword ? inbound.socksPassword : c.password)
     }));
   } else if (protocol !== 'direct') {
     inbound.clients = [
@@ -482,10 +543,11 @@ function normalizeInboundPayload(body, existing = null) {
         flow: inbound.flow || '',
         subId: randomString(12),
         limitIp: inbound.limitIp,
-        totalGB: 0,
+        limitDevice: inbound.limitDevice,
+        totalGB,
         up: 0,
         down: 0,
-        expiryTime: 0,
+        expiryTime,
         enable: true
       }
     ];
@@ -497,27 +559,38 @@ function normalizeInboundPayload(body, existing = null) {
 }
 
 function normalizeOutboundPayload(body, existing = null) {
-  const type = String(body.type || existing?.type || 'shadowsocks').toLowerCase();
-  const tag = String(body.tag || existing?.tag || `out-${type}-${randomString(4).toLowerCase()}`).trim();
+  if (body.rawJson && typeof body.rawJson === 'string') {
+    try {
+      body.rawJson = JSON.parse(body.rawJson);
+    } catch {
+      const err = new Error('自定义出站 JSON 格式有误');
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+  const rawObj = (body.rawJson && typeof body.rawJson === 'object') ? body.rawJson : null;
+  const type = String(rawObj?.type || rawObj?.protocol || body.type || existing?.type || 'shadowsocks').toLowerCase();
+  const tag = String(rawObj?.tag || body.tag || existing?.tag || `out-${type}-${randomString(4).toLowerCase()}`).trim();
   const remark = String(body.remark || existing?.remark || tag).trim();
 
   return {
     id: existing?.id || `out_${crypto.randomBytes(5).toString('hex')}`,
     tag,
-    type,
+    type: type === 'freedom' ? 'direct' : (type === 'blackhole' ? 'block' : type),
     remark,
     builtin: Boolean(existing?.builtin),
     enabled: body.enabled !== undefined ? Boolean(body.enabled) : (existing ? existing.enabled !== false : true),
-    server: String(body.server ?? existing?.server ?? '').trim(),
-    port: Number(body.port ?? existing?.port ?? 443),
-    detour: String(body.detour ?? existing?.detour ?? '').trim(),
+    server: String(rawObj?.server ?? body.server ?? existing?.server ?? '').trim(),
+    port: Number(rawObj?.server_port ?? body.port ?? existing?.port ?? 443),
+    detour: String(rawObj?.detour ?? body.detour ?? existing?.detour ?? '').trim(),
     security: String(body.security ?? existing?.security ?? (['anytls', 'hysteria2', 'tuic'].includes(type) ? 'tls' : 'none')).toLowerCase(),
     transport: String(body.transport ?? existing?.transport ?? 'tcp').toLowerCase(),
     uuid: body.uuid || existing?.uuid ? ensureUuid(body.uuid || existing?.uuid) : '',
-    password: String(body.password ?? existing?.password ?? '').trim(),
-    method: String(body.method ?? existing?.method ?? '2022-blake3-aes-128-gcm').trim(),
-    username: String(body.username ?? existing?.username ?? '').trim(),
-    flow: String(body.flow ?? existing?.flow ?? '').trim(),
+    password: String(rawObj?.password ?? body.password ?? existing?.password ?? '').trim(),
+    method: normalizeSsMethod(rawObj?.method ?? body.method ?? existing?.method ?? '2022-blake3-aes-128-gcm'),
+    uot: Boolean(body.uot ?? existing?.uot ?? false),
+    username: String(rawObj?.username ?? body.username ?? existing?.username ?? '').trim(),
+    flow: String(rawObj?.flow ?? body.flow ?? existing?.flow ?? '').trim(),
     sni: String(body.sni ?? existing?.sni ?? '').trim(),
     fingerprint: String(body.fingerprint ?? existing?.fingerprint ?? 'chrome').trim(),
     publicKey: String(body.publicKey ?? existing?.publicKey ?? '').trim(),
@@ -542,13 +615,15 @@ function normalizeOutboundPayload(body, existing = null) {
 
 function enrichInboundWithLinks(inbound, reqHost = '') {
   const cleanReqHost = String(reqHost || '').split(':')[0].replace(/^\[|\]$/g, '');
-  const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && c.valid !== false);
+  const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
   const defaultHost = store.state.settings.webDomain || realCert?.domain || store.state.settings.publicIPv4 || cleanReqHost || '127.0.0.1';
   const activeIps = singbox.getActiveIpsForInbound(inbound.tag);
+  const activeDeviceCount = singbox.getActiveDeviceCountForInbound(inbound.tag);
   return {
     ...inbound,
     activeIps,
     activeIpCount: activeIps.length,
+    activeDeviceCount,
     links: buildClientLinks(inbound, defaultHost, store.state.certificates || [], store.state.settings || {})
   };
 }
@@ -594,7 +669,7 @@ async function handleRequest(req, res) {
         res.writeHead(200, {
           'content-type': output.contentType,
           'profile-update-interval': '12',
-          'subscription-userinfo': 'upload=0; download=0; total=0; expire=0',
+          'subscription-userinfo': output.userinfo || 'upload=0; download=0; total=0; expire=0',
           'cache-control': 'no-store'
         });
         res.end(output.body);
@@ -719,7 +794,7 @@ async function handleRequest(req, res) {
           clients: totalClients,
           outbounds: outbounds.filter((o) => !o.builtin).length,
           relayBindings: relayInbounds,
-          rules: rules.filter((r) => r.enabled !== false).length,
+          rules: rules.filter((r) => r.enabled !== false && r.action !== 'sniff').length,
           certificates: (store.state.certificates || []).length
         },
         audit: (store.state.audit || []).slice(0, 15)
@@ -772,7 +847,7 @@ async function handleRequest(req, res) {
     // 8. Inbounds CRUD
     if (pathname === '/api/inbounds' && method === 'GET') {
       syncDiscoveredCerts();
-      const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && c.valid !== false);
+      const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
       return sendJson(res, 200, {
         inbounds: (store.state.inbounds || []).map((i) => enrichInboundWithLinks(i, reqHostHeader)),
         outbounds: store.state.outbounds || [],
@@ -842,6 +917,7 @@ async function handleRequest(req, res) {
       if (!existing) return sendError(res, 404, '未找到该入站节点');
       store.transact(() => {
         existing.enable = !existing.enable;
+        if (existing.enable) delete existing.disabledReason;
         store.addAudit(session.username, 'toggle_inbound', `${existing.remark} -> ${existing.enable ? '启用' : '停用'}`);
       });
       autoApplyIfEnabled();
@@ -856,18 +932,29 @@ async function handleRequest(req, res) {
         existing.up = 0;
         existing.down = 0;
         for (const c of existing.clients || []) { c.up = 0; c.down = 0; }
+        if (existing.enable === false && existing.disabledReason === 'quota') {
+          existing.enable = true;
+          delete existing.disabledReason;
+        }
         store.addAudit(session.username, 'reset_inbound_traffic', existing.remark);
       });
+      autoApplyIfEnabled();
       return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing, reqHostHeader) });
     }
 
-    // 9. Outbounds & Relay CRUD + Batch URI Import + Traffic Reset
+    // 9. Outbounds & Relay CRUD + URI Quick Parse + Batch URI Import + Traffic Reset
     if (pathname === '/api/outbounds' && method === 'GET') {
       return sendJson(res, 200, {
-        outbounds: store.state.outbounds || [],
+        outbounds: (store.state.outbounds || []).map((o) => ({ ...o, singboxPreview: toSingboxOutbound(o) })),
         inbounds: store.state.inbounds || [],
         routing: store.state.routing || { final: 'direct', rules: [] }
       });
+    }
+
+    if (pathname === '/api/outbounds/parse-uri' && method === 'POST') {
+      const body = await readJson(req);
+      const outbound = parseShareUriToOutbound(body.uri, body.tag || '', body.remark || '');
+      return sendJson(res, 200, { outbound, singboxPreview: toSingboxOutbound(outbound) });
     }
 
     if (pathname === '/api/outbounds' && method === 'POST') {
@@ -935,10 +1022,19 @@ async function handleRequest(req, res) {
       const body = await readJson(req);
       const existing = store.state.outbounds.find((x) => x.id === outMatch.id);
       if (!existing) return sendError(res, 404, '未找到该出站节点');
+      const oldTag = existing.tag;
       const updated = normalizeOutboundPayload(body, existing);
       store.transact((st) => {
         const idx = st.outbounds.findIndex((x) => x.id === existing.id);
         st.outbounds[idx] = updated;
+        if (oldTag !== updated.tag) {
+          for (const inb of st.inbounds) {
+            if (inb.outboundTag === oldTag) inb.outboundTag = updated.tag;
+          }
+          for (const r of st.routing.rules || []) {
+            if (r.outbound === oldTag) r.outbound = updated.tag;
+          }
+        }
         store.addAudit(session.username, 'update_outbound', `${updated.remark} (${updated.tag})`);
       });
       autoApplyIfEnabled();
@@ -987,7 +1083,7 @@ async function handleRequest(req, res) {
       const splitList = (v) => (Array.isArray(v) ? v : String(v || '').split(',').map((s) => s.trim()).filter(Boolean));
       const newRule = {
         id: `rule_${crypto.randomBytes(5).toString('hex')}`,
-        remark: String(body.remark || (body.inbound ? `入站 ${body.inbound} ➔ ${body.outbound}` : '分流规则')).trim(),
+        remark: String(body.remark || (body.inbound ? `入站转发: ${body.inbound} ➔ ${body.outbound}` : '分流规则')).trim(),
         enabled: body.enabled !== false,
         action: body.action || 'route',
         inbound: splitList(body.inbound),
@@ -1006,7 +1102,28 @@ async function handleRequest(req, res) {
         outbound: String(body.outbound || 'direct').trim()
       };
       store.transact((st) => {
-        st.routing.rules.push(newRule);
+        // Deduplicate if this is a pure 1-to-1 inbound relay rule
+        const isPureInboundRelay =
+          newRule.inbound.length === 1 &&
+          !newRule.domain.length &&
+          !newRule.domain_suffix.length &&
+          !newRule.ip_cidr.length &&
+          !newRule.port.length &&
+          !newRule.protocol.length &&
+          !newRule.ip_is_private;
+        if (isPureInboundRelay) {
+          const existIdx = st.routing.rules.findIndex(
+            (r) => Array.isArray(r.inbound) && r.inbound.length === 1 && r.inbound[0] === newRule.inbound[0] &&
+              !r.domain?.length && !r.domain_suffix?.length && !r.ip_cidr?.length && !r.port?.length && !r.protocol?.length && !r.ip_is_private
+          );
+          if (existIdx >= 0) {
+            st.routing.rules[existIdx] = { ...newRule, id: st.routing.rules[existIdx].id };
+          } else {
+            st.routing.rules.push(newRule);
+          }
+        } else {
+          st.routing.rules.push(newRule);
+        }
         syncRoutingRulesToInbounds(st);
         store.addAudit(session.username, 'create_route_rule', `${newRule.remark} -> ${newRule.outbound}`);
       });
@@ -1085,15 +1202,78 @@ async function handleRequest(req, res) {
       const preset = body.preset;
       const targetOutbound = body.outbound || 'direct';
       store.transact((st) => {
-        if (preset === 'block-ads') {
+        if (preset === '3xui-default') {
+          // Keep sniff and pure 1-to-1 inbound relay rules, reset others to clean 3x-ui defaults (geoip:private + bittorrent block)
+          const relayRules = (st.routing.rules || []).filter(
+            (r) => Array.isArray(r.inbound) && r.inbound.length > 0 && !r.domain?.length && !r.ip_cidr?.length
+          );
+          st.routing.rules = [
+            { id: 'rule_sniff', remark: '协议嗅探 (HTTP/TLS/QUIC)', enabled: true, action: 'sniff', inbound: [], domain: [], domain_suffix: [], domain_keyword: [], ip_cidr: [], source_ip_cidr: [], port: [], source_port: [], network: '', protocol: [], rule_set: [], ip_is_private: false, outbound: '' },
+            ...relayRules,
+            { id: 'rule_private_block', remark: '阻止私有内网探测 (geoip:private · 3x-ui 标准)', enabled: true, action: 'route', inbound: [], domain: [], domain_suffix: [], domain_keyword: [], ip_cidr: [], source_ip_cidr: [], port: [], source_port: [], network: '', protocol: [], rule_set: [], ip_is_private: true, outbound: 'block' },
+            { id: 'rule_bt_block', remark: '禁止 BitTorrent 迅雷下载 (防版权投诉封 IP · 3x-ui 标准)', enabled: true, action: 'route', inbound: [], domain: [], domain_suffix: [], domain_keyword: [], ip_cidr: [], source_ip_cidr: [], port: [], source_port: [], network: '', protocol: ['bittorrent'], rule_set: [], ip_is_private: false, outbound: 'block' }
+          ];
+        } else if (preset === 'ai-relay') {
           st.routing.rules.push({
             id: `rule_${crypto.randomBytes(4).toString('hex')}`,
-            remark: '屏蔽广告与追踪域名 (geosite-category-ads-all)',
+            remark: `AI 平台全套分流 (ChatGPT/Claude/Gemini/Grok/Perplexity/Cursor -> ${targetOutbound})`,
             enabled: true,
             action: 'route',
             inbound: [],
-            domain: ['geosite:category-ads-all'],
-            domain_suffix: [],
+            domain: [],
+            domain_suffix: [
+              'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'auth0.com',
+              'anthropic.com', 'claude.ai', 'claudeusercontent.com',
+              'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com',
+              'perplexity.ai', 'grok.com', 'x.ai', 'cursor.sh', 'cursor.com', 'copilot.microsoft.com',
+              'midjourney.com', 'poe.com', 'huggingface.co'
+            ],
+            domain_keyword: ['openai', 'anthropic', 'claude'],
+            ip_cidr: [],
+            source_ip_cidr: [],
+            port: [],
+            source_port: [],
+            network: '',
+            protocol: [],
+            rule_set: [],
+            ip_is_private: false,
+            outbound: targetOutbound
+          });
+        } else if (preset === 'foreign-trade') {
+          st.routing.rules.push({
+            id: `rule_${crypto.randomBytes(4).toString('hex')}`,
+            remark: `外贸跨境与海外社媒分流 (Google/WhatsApp/TikTok/Meta/PayPal/Amazon -> ${targetOutbound})`,
+            enabled: true,
+            action: 'route',
+            inbound: [],
+            domain: [],
+            domain_suffix: [
+              'google.com', 'googleapis.com', 'gstatic.com', 'googleusercontent.com', 'gmail.com',
+              'whatsapp.com', 'whatsapp.net', 'tiktok.com', 'tiktokv.com', 'byteoversea.com',
+              'facebook.com', 'fb.com', 'fbcdn.net', 'instagram.com', 'cdninstagram.com',
+              'twitter.com', 'x.com', 'twimg.com', 'linkedin.com', 't.me', 'telegram.org',
+              'amazon.com', 'shopify.com', 'paypal.com', 'stripe.com', 'github.com'
+            ],
+            domain_keyword: ['google', 'whatsapp', 'tiktok', 'facebook', 'instagram'],
+            ip_cidr: ['91.108.4.0/22', '91.108.8.0/22', '91.108.56.0/22', '149.154.160.0/20'],
+            source_ip_cidr: [],
+            port: [],
+            source_port: [],
+            network: '',
+            protocol: [],
+            rule_set: [],
+            ip_is_private: false,
+            outbound: targetOutbound
+          });
+        } else if (preset === 'block-ads') {
+          st.routing.rules.push({
+            id: `rule_${crypto.randomBytes(4).toString('hex')}`,
+            remark: '屏蔽常见广告与追踪域名',
+            enabled: true,
+            action: 'route',
+            inbound: [],
+            domain: [],
+            domain_suffix: ['doubleclick.net', 'googlesyndication.com', 'googleadservices.com', 'adnxs.com', 'adsrvr.org', 'taboola.com', 'outbrain.com'],
             domain_keyword: ['adservice', 'pagead2'],
             ip_cidr: [],
             source_ip_cidr: [],
@@ -1101,19 +1281,19 @@ async function handleRequest(req, res) {
             source_port: [],
             network: '',
             protocol: [],
-            rule_set: ['geosite-category-ads-all'],
+            rule_set: [],
             ip_is_private: false,
             outbound: 'block'
           });
         } else if (preset === 'cn-direct') {
           st.routing.rules.push({
             id: `rule_${crypto.randomBytes(4).toString('hex')}`,
-            remark: '中国大陆网站与 IP 直连 (geosite:cn / geoip:cn)',
+            remark: '中国大陆常见网站与 IP 直连',
             enabled: true,
             action: 'route',
             inbound: [],
             domain: ['geosite:cn'],
-            domain_suffix: ['cn'],
+            domain_suffix: ['cn', 'baidu.com', 'qq.com', 'taobao.com', 'tmall.com', 'jd.com', 'bilibili.com', '163.com', 'aliyun.com'],
             domain_keyword: [],
             ip_cidr: ['geoip:cn'],
             source_ip_cidr: [],
@@ -1121,29 +1301,9 @@ async function handleRequest(req, res) {
             source_port: [],
             network: '',
             protocol: [],
-            rule_set: ['geosite-cn', 'geoip-cn'],
+            rule_set: [],
             ip_is_private: false,
             outbound: 'direct'
-          });
-        } else if (preset === 'ai-relay') {
-          st.routing.rules.push({
-            id: `rule_${crypto.randomBytes(4).toString('hex')}`,
-            remark: `AI 平台分流 (OpenAI/Claude/Gemini -> ${targetOutbound})`,
-            enabled: true,
-            action: 'route',
-            inbound: [],
-            domain: ['geosite:openai'],
-            domain_suffix: ['openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'anthropic.com', 'claude.ai', 'gemini.google.com'],
-            domain_keyword: [],
-            ip_cidr: [],
-            source_ip_cidr: [],
-            port: [],
-            source_port: [],
-            network: '',
-            protocol: [],
-            rule_set: ['geosite-openai'],
-            ip_is_private: false,
-            outbound: targetOutbound
           });
         } else if (preset === 'media-relay') {
           st.routing.rules.push({
@@ -1152,16 +1312,16 @@ async function handleRequest(req, res) {
             enabled: true,
             action: 'route',
             inbound: [],
-            domain: ['geosite:netflix'],
-            domain_suffix: ['netflix.com', 'nflxvideo.net', 'nflximg.net', 'disneyplus.com', 'bamgrid.com', 'youtube.com', 'googlevideo.com'],
-            domain_keyword: [],
+            domain: [],
+            domain_suffix: ['netflix.com', 'netflix.net', 'nflxvideo.net', 'nflximg.net', 'nflxext.com', 'disneyplus.com', 'bamgrid.com', 'youtube.com', 'googlevideo.com', 'ytimg.com'],
+            domain_keyword: ['netflix'],
             ip_cidr: [],
             source_ip_cidr: [],
             port: [],
             source_port: [],
             network: '',
             protocol: [],
-            rule_set: ['geosite-netflix'],
+            rule_set: [],
             ip_is_private: false,
             outbound: targetOutbound
           });
@@ -1210,6 +1370,8 @@ async function handleRequest(req, res) {
         'migrate_3xui',
         `入站 ${record.inboundsCount} 个 / 出站 ${record.outboundsCount} 个 / 规则 ${record.rulesCount} 条`
       ));
+      const allPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
+      openFirewallPorts(allPorts);
       autoApplyIfEnabled();
       return sendJson(res, 200, {
         migrated: true,
@@ -1220,7 +1382,7 @@ async function handleRequest(req, res) {
 
     // 12. Sing-box Core Management & Version Switching
     if (pathname === '/api/singbox/config' && method === 'GET') {
-      const config = buildSingboxConfig(store.state);
+      const { config } = singbox.writeConfig();
       return sendJson(res, 200, {
         status: singbox.getStatus(),
         config,
@@ -1382,6 +1544,9 @@ async function handleRequest(req, res) {
         if (body.webDomain !== undefined) s.webDomain = String(body.webDomain).trim();
         if (body.publicIPv4 !== undefined) s.publicIPv4 = String(body.publicIPv4).trim();
         if (body.publicIPv6 !== undefined) s.publicIPv6 = String(body.publicIPv6).trim();
+        if (body.trafficResetDay !== undefined) {
+          s.trafficResetDay = Math.max(0, Math.min(31, Math.floor(Number(body.trafficResetDay || 0))));
+        }
         if (body.webCertFile !== undefined) {
           if (body.webCertFile !== s.webCertFile) needServerRestart = true;
           s.webCertFile = String(body.webCertFile).trim();
@@ -1469,8 +1634,6 @@ async function handleRequest(req, res) {
     return sendError(res, error.statusCode || 500, error.message || '服务器内部错误');
   }
 }
-
-let activeServer = null;
 
 function createPanelServer() {
   const s = store.state.settings;

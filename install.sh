@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
@@ -135,7 +137,6 @@ configure_panel() {
   mkdir -p "$DATA_DIR" "$CONF_DIR/sing-box" "$CONF_DIR/certs" /root/cert
   chmod 0700 "$DATA_DIR" "$CONF_DIR"
 
-  # Stop running service before modifyingnexusgate.json to avoid memory overwrite
   systemctl stop nexusgate.service 2>/dev/null || true
 
   local default_port default_user default_pass default_path
@@ -177,7 +178,6 @@ NG_SINGBOX_CONFIG=${CONF_DIR}/sing-box/config.json
 EOF
   chmod 0600 "${CONF_DIR}/nexusgate.env"
 
-  # Remove any old www.bing.com self-signed folder
   rm -rf /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
 
   NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --set-account "$admin_user" "$admin_pass" >/dev/null
@@ -211,13 +211,8 @@ PY
     fi
   fi
 
-  # Open firewall port automatically
-  if command -v ufw >/dev/null 2>&1; then
-    ufw allow "${panel_port}/tcp" >/dev/null 2>&1 || true
-  elif command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="${panel_port}/tcp" >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
-  fi
+  # Open firewall ports automatically across ufw / firewalld / iptables
+  NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
 
   # Setup systemd services & CLI symlinks
   install -m 0644 "$INSTALL_DIR/systemd/nexusgate.service" /etc/systemd/system/nexusgate.service
@@ -233,6 +228,7 @@ PY
     systemctl enable --now nexusgate.service
     systemctl restart nexusgate.service
     systemctl enable --now nexusgate-singbox.service || true
+    systemctl restart nexusgate-singbox.service || true
   else
     pkill -f "node $INSTALL_DIR/server.js" 2>/dev/null || true
     nohup env NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" >/var/log/nexusgate.log 2>&1 &
@@ -245,7 +241,7 @@ PY
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.2 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.3 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
   echo -e " 面板访问地址 : ${cyan}${login_url}${plain}"
   echo -e " 面板端口     : ${yellow}${panel_port}${plain}"
