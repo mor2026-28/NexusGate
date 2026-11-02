@@ -5,7 +5,7 @@ const https = require('node:https');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { Store } = require('./lib/store');
+const { Store, defaultState } = require('./lib/store');
 const { hashSecret, verifySecret, randomString, SessionManager } = require('./lib/auth');
 const {
   sendJson,
@@ -32,22 +32,49 @@ const {
 const { KNOWN_VERSIONS, buildSingboxConfig, SingboxManager } = require('./lib/singbox');
 const {
   getSystemStatus,
+  applyKernelAcceleration,
   inspectCertificate,
+  discoverSystemCertificates,
   issueSelfSignedCert,
   saveCustomCert,
-  issueAcmeCert
+  issueAcmeCert,
+  tcpPingHostPort,
+  openFirewallPorts
 } = require('./lib/system');
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
 
 const store = new Store(DATA_FILE);
 
-// Handle CLI flags for `nexusgate` management script
+function syncDiscoveredCerts() {
+  const discovered = discoverSystemCertificates();
+  if (!discovered.length) return;
+  let changed = false;
+  for (const d of discovered) {
+    const exists = store.state.certificates.some((c) => c.certPath === d.certPath || c.domain === d.domain);
+    if (!exists) {
+      store.state.certificates.push(d);
+      changed = true;
+    }
+  }
+  if (!store.state.settings.defaultCertFile && store.state.certificates[0]) {
+    const c0 = store.state.certificates[0];
+    store.state.settings.defaultTlsDomain = c0.domain;
+    store.state.settings.defaultCertFile = c0.certPath;
+    store.state.settings.defaultKeyFile = c0.keyPath;
+    changed = true;
+  }
+  if (changed) store.save();
+}
+
+syncDiscoveredCerts();
+
+// Handle CLI flags for `nexusgate` / `ng` management script
 if (process.argv.length > 2 && process.argv[2].startsWith('--')) {
   handleCliCommand(process.argv.slice(2));
   process.exit(0);
@@ -58,35 +85,65 @@ sessions.setMaxAgeMinutes(store.state.settings.sessionMaxAge || 720);
 const singbox = new SingboxManager(store);
 const loginAttempts = new Map();
 
+function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes = true) {
+  st.certificates = st.certificates.filter((c) => c.domain !== cert.domain && c.certPath !== cert.certPath);
+  st.certificates.unshift(cert);
+  if (applyToPanel) {
+    st.settings.webCertFile = cert.certPath;
+    st.settings.webKeyFile = cert.keyPath;
+    if (cert.type !== 'self-signed' && cert.domain && !cert.domain.includes('bing.com')) {
+      st.settings.webDomain = cert.domain;
+    }
+  }
+  if (applyToNodes) {
+    st.settings.defaultTlsDomain = cert.domain;
+    st.settings.defaultCertFile = cert.certPath;
+    st.settings.defaultKeyFile = cert.keyPath;
+    for (const inb of st.inbounds || []) {
+      if (inb.security === 'tls' && (!inb.certPath || inb.certPath.includes('selfsigned') || inb.certPath.includes('/panel/'))) {
+        inb.tlsDomain = cert.domain;
+        inb.certPath = cert.certPath;
+        inb.keyPath = cert.keyPath;
+      }
+    }
+  }
+}
+
 function handleCliCommand(args) {
   const cmd = args[0];
   if (cmd === '--show-info') {
     const s = store.state.settings;
-    const proto = s.webCertFile && s.webKeyFile && fs.existsSync(s.webCertFile) ? 'https' : 'http';
-    const host = s.webDomain || s.publicIPv4 || '您的服务器IP';
+    const useHttps = Boolean(s.webCertFile && s.webKeyFile && fs.existsSync(s.webCertFile));
+    const proto = useHttps ? 'https' : 'http';
+    const host = s.webDomain || s.publicIPv4 || '127.0.0.1';
     const base = normalizeBasePath(s.webBasePath);
+    const cleanUrl = `${proto}://${host}:${s.webPort}${base === '/' ? '/' : `${base}/`}`;
     console.log(JSON.stringify({
       version: VERSION,
       username: store.state.admin.username,
       listen: s.webListen,
       port: s.webPort,
       basePath: base,
-      https: proto === 'https',
-      url: `${proto}://${host}:${s.webPort}${base === '/' ? '/' : `${base}/`}`,
+      strictBasePath: Boolean(s.strictBasePath),
+      https: useHttps,
+      certFile: s.webCertFile || '未绑定 (HTTP)',
+      defaultNodeTlsDomain: s.defaultTlsDomain || 'www.bing.com',
+      url: cleanUrl,
       inboundsCount: store.state.inbounds.length,
-      outboundsCount: store.state.outbounds.length
+      outboundsCount: store.state.outbounds.filter((o) => !o.builtin).length,
+      rulesCount: (store.state.routing?.rules || []).length
     }, null, 2));
     return;
   }
   if (cmd === '--set-account') {
-    const username = args[1];
-    const password = args[2];
+    const username = String(args[1] || '').trim();
+    const password = String(args[2] || '').trim();
     if (!username || !password) {
       console.error('用法: node server.js --set-account <username> <password>');
       process.exit(1);
     }
     store.transact((st) => {
-      st.admin.username = username.trim();
+      st.admin.username = username;
       st.admin.passwordHash = hashSecret(password);
       st.admin.updatedAt = new Date().toISOString();
     });
@@ -113,14 +170,50 @@ function handleCliCommand(args) {
     console.log(`面板安全根路径已更改为: ${base}`);
     return;
   }
-  if (cmd === '--set-cert') {
-    const certFile = args[1] || '';
-    const keyFile = args[2] || '';
+  if (cmd === '--reset-settings') {
     store.transact((st) => {
-      st.settings.webCertFile = certFile;
-      st.settings.webKeyFile = keyFile;
+      const def = defaultState().settings;
+      st.settings = {
+        ...def,
+        publicIPv4: st.settings.publicIPv4 || '',
+        webPort: 2053,
+        webBasePath: '/',
+        strictBasePath: false
+      };
     });
-    console.log(`面板 SSL 证书路径已更新`);
+    console.log('面板设置已重置为默认状态 (端口: 2053, 路径: /)');
+    return;
+  }
+  if (cmd === '--issue-selfsigned') {
+    const domain = String(args[1] || store.state.settings.webDomain || 'www.bing.com').trim();
+    const ip = String(args[2] || store.state.settings.publicIPv4 || '').trim();
+    const cert = issueSelfSignedCert({ domain, ip, days: 3650 });
+    store.transact((st) => {
+      bindCertificateEverywhere(st, cert, true, true);
+    });
+    singbox.writeConfig();
+    console.log(`10 年自签证书已生成并自动绑定至面板 HTTPS 与 Sing-box 节点默认证书: ${cert.certPath}`);
+    return;
+  }
+  if (cmd === '--set-cert') {
+    const certFile = String(args[1] || '').trim();
+    const keyFile = String(args[2] || '').trim();
+    const domain = String(args[3] || store.state.settings.webDomain || '').trim();
+    store.transact((st) => {
+      if (!certFile || !keyFile) {
+        st.settings.webCertFile = '';
+        st.settings.webKeyFile = '';
+      } else {
+        const cert = saveCustomCert({
+          domain: domain || path.basename(path.dirname(certFile)) || 'panel-cert',
+          certPath: certFile,
+          keyPath: keyFile
+        });
+        bindCertificateEverywhere(st, cert, true, true);
+      }
+    });
+    singbox.writeConfig();
+    console.log(certFile ? `SSL 证书已成功绑定至面板与节点: ${certFile}` : '已关闭面板 HTTPS，恢复为 HTTP 访问');
     return;
   }
   if (cmd === '--migrate-3xui') {
@@ -148,6 +241,9 @@ function normalizeInboundPayload(body, existing = null) {
   const listen = String(body.listen || existing?.listen || '::').trim();
   const enable = body.enable !== undefined ? Boolean(body.enable) : (existing ? existing.enable !== false : true);
   const outboundTag = String(body.outboundTag ?? existing?.outboundTag ?? 'default').trim();
+  const limitIp = Math.max(0, Number(body.limitIp ?? existing?.limitIp ?? 0));
+  const totalGB = Math.max(0, Number(body.totalGB ?? (existing?.total ? Math.round(existing.total / (1024 ** 3)) : 0)));
+  const total = body.total !== undefined ? Number(body.total) : (totalGB > 0 ? totalGB * (1024 ** 3) : 0);
 
   let security = String(body.security ?? existing?.security ?? 'none').toLowerCase();
   if (['anytls', 'hysteria2', 'tuic'].includes(protocol)) {
@@ -166,9 +262,10 @@ function normalizeInboundPayload(body, existing = null) {
     security,
     transport,
     outboundTag,
+    limitIp,
     up: Number(body.up ?? existing?.up ?? 0),
     down: Number(body.down ?? existing?.down ?? 0),
-    total: Number(body.total ?? existing?.total ?? 0),
+    total,
     expiryTime: Number(body.expiryTime ?? existing?.expiryTime ?? 0),
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -205,9 +302,12 @@ function normalizeInboundPayload(body, existing = null) {
   }
 
   if (security === 'tls') {
-    inbound.tlsDomain = String(body.tlsDomain ?? existing?.tlsDomain ?? '').trim();
-    inbound.certPath = String(body.certPath ?? existing?.certPath ?? '').trim();
-    inbound.keyPath = String(body.keyPath ?? existing?.keyPath ?? '').trim();
+    const defDomain = store.state.settings.defaultTlsDomain || store.state.settings.webDomain || 'www.bing.com';
+    const defCert = store.state.settings.defaultCertFile || store.state.settings.webCertFile || '';
+    const defKey = store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || '';
+    inbound.tlsDomain = String(body.tlsDomain ?? existing?.tlsDomain ?? defDomain).trim();
+    inbound.certPath = String(body.certPath ?? existing?.certPath ?? defCert).trim();
+    inbound.keyPath = String(body.keyPath ?? existing?.keyPath ?? defKey).trim();
     inbound.allowInsecure = Boolean(body.allowInsecure ?? existing?.allowInsecure ?? false);
     inbound.alpn = Array.isArray(body.alpn)
       ? body.alpn
@@ -251,7 +351,6 @@ function normalizeInboundPayload(body, existing = null) {
     inbound.network = String(body.network ?? existing?.network ?? 'tcp,udp').trim();
   }
 
-  // Normalize clients list
   if (Array.isArray(body.clients) && body.clients.length > 0) {
     inbound.clients = body.clients.map((c, i) => ({
       id: c.id || c.uuid || crypto.randomUUID(),
@@ -260,6 +359,7 @@ function normalizeInboundPayload(body, existing = null) {
       password: String(c.password || inbound.password || inbound.socksPassword || generateSsKey(inbound.method || 'aes-128-gcm')).trim(),
       flow: c.flow !== undefined ? c.flow : (inbound.flow || ''),
       subId: String(c.subId || randomString(10)).trim(),
+      limitIp: Number(c.limitIp ?? inbound.limitIp ?? 0),
       totalGB: Number(c.totalGB || 0),
       up: Number(c.up || 0),
       down: Number(c.down || 0),
@@ -267,11 +367,14 @@ function normalizeInboundPayload(body, existing = null) {
       enable: c.enable !== false
     }));
   } else if (existing?.clients?.length && !body.resetClients) {
-    inbound.clients = existing.clients.map((c) => ({
+    inbound.clients = existing.clients.map((c, idx) => ({
       ...c,
+      id: idx === 0 && body.uuid ? body.uuid : c.id,
+      email: idx === 0 && body.clientEmail ? body.clientEmail : c.email,
+      limitIp: inbound.limitIp,
       flow: inbound.protocol === 'vless' ? (inbound.flow ?? c.flow ?? '') : c.flow,
-      password: ['anytls', 'hysteria2', 'trojan', 'shadowsocks'].includes(inbound.protocol) && body.password
-        ? body.password
+      password: ['anytls', 'hysteria2', 'trojan', 'shadowsocks', 'tuic'].includes(inbound.protocol) && inbound.password
+        ? inbound.password
         : c.password
     }));
   } else if (protocol !== 'direct') {
@@ -283,6 +386,7 @@ function normalizeInboundPayload(body, existing = null) {
         password: inbound.password || inbound.socksPassword || generateSsKey(inbound.method || 'aes-128-gcm'),
         flow: inbound.flow || '',
         subId: randomString(10),
+        limitIp: inbound.limitIp,
         totalGB: 0,
         up: 0,
         down: 0,
@@ -302,7 +406,7 @@ function normalizeOutboundPayload(body, existing = null) {
   const tag = String(body.tag || existing?.tag || `out-${type}-${randomString(4).toLowerCase()}`).trim();
   const remark = String(body.remark || existing?.remark || tag).trim();
 
-  const outbound = {
+  return {
     id: existing?.id || `out_${crypto.randomBytes(5).toString('hex')}`,
     tag,
     type,
@@ -337,14 +441,17 @@ function normalizeOutboundPayload(body, existing = null) {
           .map((s) => s.trim())
           .filter(Boolean)
   };
-  return outbound;
 }
 
-function enrichInboundWithLinks(inbound) {
-  const defaultHost = store.state.settings.publicIPv4 || store.state.settings.webDomain || '127.0.0.1';
+function enrichInboundWithLinks(inbound, reqHost = '') {
+  const cleanReqHost = String(reqHost || '').split(':')[0].replace(/^\[|\]$/g, '');
+  const defaultHost = store.state.settings.publicIPv4 || store.state.settings.webDomain || cleanReqHost || '127.0.0.1';
+  const activeIps = singbox.getActiveIpsForInbound(inbound.tag);
   return {
     ...inbound,
-    links: buildClientLinks(inbound, defaultHost)
+    activeIps,
+    activeIpCount: activeIps.length,
+    links: buildClientLinks(inbound, defaultHost, store.state.certificates || [], store.state.settings || {})
   };
 }
 
@@ -362,7 +469,8 @@ function autoApplyIfEnabled() {
 
 async function handleRequest(req, res) {
   try {
-    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const reqHostHeader = req.headers.host || 'localhost';
+    const url = new URL(req.url || '/', `http://${reqHostHeader}`);
     const rawPathname = url.pathname;
     const method = req.method || 'GET';
 
@@ -384,11 +492,11 @@ async function handleRequest(req, res) {
         const ua = String(req.headers['user-agent'] || '').toLowerCase();
         const fmt = url.searchParams.get('format')
           || (ua.includes('clash') || ua.includes('mihomo') || ua.includes('stash') ? 'clash' : (ua.includes('sing-box') || ua.includes('sfi') ? 'singbox' : 'base64'));
-        const output = formatSubscription(store.state, subMatch.token, fmt);
+        const output = formatSubscription(store.state, subMatch.token, fmt, reqHostHeader);
         res.writeHead(200, {
           'content-type': output.contentType,
           'profile-update-interval': '12',
-          'subscription-userinfo': `upload=0; download=0; total=0; expire=0`,
+          'subscription-userinfo': 'upload=0; download=0; total=0; expire=0',
           'cache-control': 'no-store'
         });
         res.end(output.body);
@@ -396,24 +504,43 @@ async function handleRequest(req, res) {
       }
     }
 
-    // 3. Enforce webBasePath for Panel UI & API
+    // 3. Enforce or Smart-Redirect webBasePath for Panel UI & API
     const basePath = normalizeBasePath(store.state.settings.webBasePath || '/');
     if (basePath !== '/' && rawPathname === basePath && !rawPathname.endsWith('/')) {
       res.writeHead(302, { location: `${basePath}/` });
       res.end();
       return;
     }
-    const pathname = stripBasePath(rawPathname, basePath);
+
+    let pathname = stripBasePath(rawPathname, basePath);
     if (pathname === null) {
-      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-      res.end('404 Not Found');
-      return;
+      // Allow direct fallback if /api/ or static asset is requested from root, OR redirect browser navigation to basePath!
+      if (!store.state.settings.strictBasePath) {
+        if (rawPathname.startsWith('/api/') || rawPathname === '/styles.css' || rawPathname === '/app.js' || rawPathname.startsWith('/vendor/')) {
+          pathname = rawPathname;
+        } else if (method === 'GET') {
+          res.writeHead(302, { location: `${basePath}/` });
+          res.end();
+          return;
+        }
+      }
+      if (pathname === null) {
+        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('404 Not Found');
+        return;
+      }
     }
 
     // 4. Static files
     if (method === 'GET' && !pathname.startsWith('/api/')) {
       const served = await serveStatic(PUBLIC_DIR, pathname, res, basePath);
       if (served) return;
+      // If user pasted an extra suffix in browser URL (e.g. /basePath/something), redirect cleanly to /basePath/
+      if (!path.extname(pathname)) {
+        res.writeHead(302, { location: basePath === '/' ? '/' : `${basePath}/` });
+        res.end();
+        return;
+      }
     }
 
     // 5. Public Auth Endpoints
@@ -435,7 +562,7 @@ async function handleRequest(req, res) {
         record.count = 0;
         record.resetAt = Date.now() + 600000;
       }
-      if (record.count >= 12) {
+      if (record.count >= 15) {
         return sendError(res, 429, '登录尝试次数过多，请稍后再试', 'rate_limited');
       }
       const body = await readJson(req);
@@ -475,7 +602,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    // 7. Overview & System Status
+    // 7. Overview & System Status + BBR/HY2 Acceleration & Firewall
     if (pathname === '/api/overview' && method === 'GET') {
       const system = getSystemStatus(singbox, store.state.settings);
       const inbounds = store.state.inbounds || [];
@@ -483,7 +610,7 @@ async function handleRequest(req, res) {
       const rules = store.state.routing?.rules || [];
       const totalClients = inbounds.reduce((acc, i) => acc + (i.clients?.length || 0), 0);
       const relayInbounds = inbounds.filter((i) => (i.outboundTag && i.outboundTag !== 'default' && i.outboundTag !== 'direct') || i.protocol === 'direct').length;
-      const local3xuiExists = fs.existsSync('/etc/x-ui/x-ui.db');
+      const local3xuiExists = fs.existsSync('/etc/x-ui/x-ui.db') || fs.existsSync('/root/3xui_backup.tar.gz');
 
       return sendJson(res, 200, {
         version: VERSION,
@@ -500,6 +627,23 @@ async function handleRequest(req, res) {
         },
         audit: (store.state.audit || []).slice(0, 15)
       });
+    }
+
+    if (pathname === '/api/system/acceleration' && method === 'POST') {
+      const body = await readJson(req);
+      const accel = applyKernelAcceleration(body.mode || 'all');
+      store.transact(() => store.addAudit(session.username, 'enable_bbr_hy2', `模式: ${body.mode || 'all'} (拥塞算法: ${accel.congestion})`));
+      return sendJson(res, 200, { acceleration: accel });
+    }
+
+    if (pathname === '/api/system/firewall' && method === 'POST') {
+      const ports = [
+        store.state.settings.webPort,
+        ...(store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port)
+      ];
+      const result = openFirewallPorts(ports);
+      store.transact(() => store.addAudit(session.username, 'open_firewall_ports', `放行端口: ${result.openedPorts.join(', ')}`));
+      return sendJson(res, 200, result);
     }
 
     if (pathname === '/api/catalog' && method === 'GET') {
@@ -526,12 +670,18 @@ async function handleRequest(req, res) {
       });
     }
 
-    // 8. Inbounds CRUD
+    // 8. Inbounds CRUD & IP/Traffic Management
     if (pathname === '/api/inbounds' && method === 'GET') {
+      syncDiscoveredCerts();
       return sendJson(res, 200, {
-        inbounds: (store.state.inbounds || []).map(enrichInboundWithLinks),
+        inbounds: (store.state.inbounds || []).map((i) => enrichInboundWithLinks(i, reqHostHeader)),
         outbounds: store.state.outbounds || [],
-        certificates: store.state.certificates || []
+        certificates: store.state.certificates || [],
+        defaultSettings: {
+          defaultTlsDomain: store.state.settings.defaultTlsDomain || store.state.settings.webDomain || 'www.bing.com',
+          defaultCertFile: store.state.settings.defaultCertFile || store.state.settings.webCertFile || '',
+          defaultKeyFile: store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || ''
+        }
       });
     }
 
@@ -546,8 +696,9 @@ async function handleRequest(req, res) {
         st.inbounds.unshift(inbound);
         store.addAudit(session.username, 'create_inbound', `${inbound.remark} (${inbound.protocol}:${inbound.port})`);
       });
+      openFirewallPorts([inbound.port]);
       autoApplyIfEnabled();
-      return sendJson(res, 201, { inbound: enrichInboundWithLinks(inbound) });
+      return sendJson(res, 201, { inbound: enrichInboundWithLinks(inbound, reqHostHeader) });
     }
 
     const inbMatch = route('/api/inbounds/:id', pathname);
@@ -565,8 +716,9 @@ async function handleRequest(req, res) {
         st.inbounds[idx] = updated;
         store.addAudit(session.username, 'update_inbound', `${updated.remark} (${updated.protocol}:${updated.port})`);
       });
+      openFirewallPorts([updated.port]);
       autoApplyIfEnabled();
-      return sendJson(res, 200, { inbound: enrichInboundWithLinks(updated) });
+      return sendJson(res, 200, { inbound: enrichInboundWithLinks(updated, reqHostHeader) });
     }
 
     if (inbMatch && method === 'DELETE') {
@@ -589,10 +741,23 @@ async function handleRequest(req, res) {
         store.addAudit(session.username, 'toggle_inbound', `${existing.remark} -> ${existing.enable ? '启用' : '停用'}`);
       });
       autoApplyIfEnabled();
-      return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing) });
+      return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing, reqHostHeader) });
     }
 
-    // 9. Outbounds & Relay CRUD
+    const inbReset = route('/api/inbounds/:id/reset-traffic', pathname);
+    if (inbReset && method === 'POST') {
+      const existing = store.state.inbounds.find((x) => x.id === inbReset.id);
+      if (!existing) return sendError(res, 404, '未找到该入站节点');
+      store.transact(() => {
+        existing.up = 0;
+        existing.down = 0;
+        for (const c of existing.clients || []) { c.up = 0; c.down = 0; }
+        store.addAudit(session.username, 'reset_inbound_traffic', existing.remark);
+      });
+      return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing, reqHostHeader) });
+    }
+
+    // 9. Outbounds & Relay CRUD + TCP Latency Test
     if (pathname === '/api/outbounds' && method === 'GET') {
       return sendJson(res, 200, {
         outbounds: store.state.outbounds || [],
@@ -628,6 +793,14 @@ async function handleRequest(req, res) {
       return sendJson(res, 201, { outbound });
     }
 
+    const outPing = route('/api/outbounds/:id/ping', pathname);
+    if (outPing && method === 'POST') {
+      const existing = store.state.outbounds.find((x) => x.id === outPing.id);
+      if (!existing || !existing.server) return sendError(res, 404, '该出站无远程服务器地址');
+      const ping = await tcpPingHostPort(existing.server, existing.port || 443);
+      return sendJson(res, 200, { id: existing.id, tag: existing.tag, ...ping });
+    }
+
     const outMatch = route('/api/outbounds/:id', pathname);
     if (outMatch && method === 'PUT') {
       const body = await readJson(req);
@@ -658,7 +831,7 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { ok: true });
     }
 
-    // 10. Routing & Diversion (分流规则管理)
+    // 10. Routing & Diversion
     if (pathname === '/api/routing' && method === 'GET') {
       return sendJson(res, 200, {
         routing: store.state.routing,
@@ -872,7 +1045,10 @@ async function handleRequest(req, res) {
       } else {
         const body = await readJson(req);
         if (body.source === 'local') {
-          const localPath = body.dbPath || '/etc/x-ui/x-ui.db';
+          let localPath = body.dbPath || '/etc/x-ui/x-ui.db';
+          if (!fs.existsSync(localPath) && fs.existsSync('/root/3xui_backup.tar.gz')) {
+            localPath = '/root/3xui_backup.tar.gz';
+          }
           parsed = parse3xuiPayload({ dbPath: localPath });
         } else if (body.dbBase64) {
           const dbBuffer = Buffer.from(body.dbBase64, 'base64');
@@ -880,7 +1056,7 @@ async function handleRequest(req, res) {
         } else if (body.jsonPayload) {
           parsed = parse3xuiPayload({ jsonPayload: typeof body.jsonPayload === 'string' ? JSON.parse(body.jsonPayload) : body.jsonPayload });
         } else {
-          throw new Error('请上传 x-ui.db 文件、选择本机 /etc/x-ui/x-ui.db 或粘贴 3x-ui JSON 配置');
+          throw new Error('请上传 x-ui.db / 3xui_backup.tar.gz 文件、选择本机路径或粘贴 3x-ui JSON 配置');
         }
       }
 
@@ -938,30 +1114,30 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { version: ver, status: singbox.getStatus() });
     }
 
-    // 13. SSL Certificates Management
+    // 13. SSL Certificates Management (One-stop panel + node auto-binding)
     if (pathname === '/api/certificates' && method === 'GET') {
+      syncDiscoveredCerts();
       const certs = (store.state.certificates || []).map((c) => ({
         ...c,
         ...inspectCertificate(c.certPath, c.keyPath)
       }));
-      return sendJson(res, 200, { certificates: certs });
+      return sendJson(res, 200, { certificates: certs, settings: store.state.settings });
     }
 
     if (pathname === '/api/certificates/self-signed' && method === 'POST') {
       const body = await readJson(req);
       const cert = issueSelfSignedCert({
         domain: body.domain || store.state.settings.webDomain || 'www.bing.com',
+        ip: store.state.settings.publicIPv4 || '',
         days: Number(body.days || 3650)
       });
+      const bindPanel = body.applyToPanel !== false;
       store.transact((st) => {
-        st.certificates = st.certificates.filter((c) => c.domain !== cert.domain);
-        st.certificates.unshift(cert);
-        if (body.applyToPanel) {
-          st.settings.webCertFile = cert.certPath;
-          st.settings.webKeyFile = cert.keyPath;
-        }
+        bindCertificateEverywhere(st, cert, bindPanel, true);
         store.addAudit(session.username, 'issue_selfsigned_cert', cert.domain);
       });
+      autoApplyIfEnabled();
+      if (bindPanel) setTimeout(() => restartPanelServer(), 300);
       return sendJson(res, 201, { certificate: cert });
     }
 
@@ -974,15 +1150,13 @@ async function handleRequest(req, res) {
         certPath: body.certPath,
         keyPath: body.keyPath
       });
+      const bindPanel = body.applyToPanel !== false;
       store.transact((st) => {
-        st.certificates = st.certificates.filter((c) => c.domain !== cert.domain);
-        st.certificates.unshift(cert);
-        if (body.applyToPanel) {
-          st.settings.webCertFile = cert.certPath;
-          st.settings.webKeyFile = cert.keyPath;
-        }
+        bindCertificateEverywhere(st, cert, bindPanel, true);
         store.addAudit(session.username, 'save_custom_cert', cert.domain);
       });
+      autoApplyIfEnabled();
+      if (bindPanel) setTimeout(() => restartPanelServer(), 300);
       return sendJson(res, 201, { certificate: cert });
     }
 
@@ -993,18 +1167,31 @@ async function handleRequest(req, res) {
         email: body.email,
         mode: body.mode || 'standalone',
         cfToken: body.cfToken || '',
+        cfKey: body.cfKey || '',
+        cfEmail: body.cfEmail || '',
         webPort: Number(body.webPort || 80)
       });
+      const bindPanel = body.applyToPanel !== false;
       store.transact((st) => {
-        st.certificates = st.certificates.filter((c) => c.domain !== cert.domain);
-        st.certificates.unshift(cert);
-        if (body.applyToPanel) {
-          st.settings.webCertFile = cert.certPath;
-          st.settings.webKeyFile = cert.keyPath;
-        }
+        bindCertificateEverywhere(st, cert, bindPanel, true);
         store.addAudit(session.username, 'issue_acme_cert', `${cert.domain} (${cert.type})`);
       });
+      autoApplyIfEnabled();
+      if (bindPanel) setTimeout(() => restartPanelServer(), 300);
       return sendJson(res, 201, { certificate: cert });
+    }
+
+    if (pathname === '/api/certificates/bind-all' && method === 'POST') {
+      const body = await readJson(req);
+      const cert = store.state.certificates.find((c) => c.id === body.id || c.certPath === body.certPath);
+      if (!cert) return sendError(res, 404, '未找到该证书');
+      store.transact((st) => {
+        bindCertificateEverywhere(st, cert, true, true);
+        store.addAudit(session.username, 'bind_cert_all', cert.domain);
+      });
+      autoApplyIfEnabled();
+      setTimeout(() => restartPanelServer(), 300);
+      return sendJson(res, 200, { ok: true, certificate: cert });
     }
 
     const certMatch = route('/api/certificates/:id', pathname);
@@ -1018,7 +1205,8 @@ async function handleRequest(req, res) {
 
     // 14. Panel Security & Settings
     if (pathname === '/api/settings' && method === 'GET') {
-      const subItems = collectSubscriptionItems(store.state, 'all');
+      syncDiscoveredCerts();
+      const subItems = collectSubscriptionItems(store.state, 'all', reqHostHeader);
       return sendJson(res, 200, {
         settings: store.state.settings,
         admin: { username: store.state.admin.username, updatedAt: store.state.admin.updatedAt },
@@ -1048,16 +1236,21 @@ async function handleRequest(req, res) {
         if (body.webBasePath !== undefined) {
           s.webBasePath = normalizeBasePath(body.webBasePath);
         }
+        if (body.strictBasePath !== undefined) {
+          s.strictBasePath = Boolean(body.strictBasePath);
+        }
         if (body.webDomain !== undefined) s.webDomain = String(body.webDomain).trim();
         if (body.publicIPv4 !== undefined) s.publicIPv4 = String(body.publicIPv4).trim();
         if (body.publicIPv6 !== undefined) s.publicIPv6 = String(body.publicIPv6).trim();
         if (body.webCertFile !== undefined) {
           if (body.webCertFile !== s.webCertFile) needServerRestart = true;
           s.webCertFile = String(body.webCertFile).trim();
+          if (s.webCertFile) s.defaultCertFile = s.webCertFile;
         }
         if (body.webKeyFile !== undefined) {
           if (body.webKeyFile !== s.webKeyFile) needServerRestart = true;
           s.webKeyFile = String(body.webKeyFile).trim();
+          if (s.webKeyFile) s.defaultKeyFile = s.webKeyFile;
         }
         if (body.subEnable !== undefined) s.subEnable = Boolean(body.subEnable);
         if (body.subPath !== undefined) s.subPath = normalizeBasePath(body.subPath);
@@ -1190,6 +1383,7 @@ function restartPanelServer() {
 if (require.main === module) {
   startPanelServer();
   setInterval(() => sessions.prune(), 600000).unref();
+  setInterval(() => singbox.pollConnectionsAndEnforceLimits().catch(() => {}), 5000).unref();
 }
 
 module.exports = {

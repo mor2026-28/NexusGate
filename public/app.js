@@ -12,9 +12,11 @@ const state = {
   catalog: { inboundProtocols: [], outboundProtocols: [], ssMethods: [], realityPresets: [], knownVersions: [] },
   inbounds: [],
   outbounds: [],
+  outboundPings: {},
   routing: { final: 'direct', rules: [], ruleSets: [] },
   dns: { strategy: 'prefer_ipv4' },
   certificates: [],
+  defaultSettings: { defaultTlsDomain: 'www.bing.com', defaultCertFile: '', defaultKeyFile: '' },
   settings: {},
   admin: {},
   migrations: [],
@@ -137,10 +139,10 @@ function updateSidebarIndicator() {
   if (!sb || !dot || !label) return;
   dot.className = 'live-dot';
   if (sb.state === 'running') {
-    label.textContent = `Sing-box 运行中`;
+    label.textContent = 'Sing-box 运行中';
   } else if (sb.state === 'error') {
     dot.classList.add('error');
-    label.textContent = `Sing-box 异常`;
+    label.textContent = 'Sing-box 异常';
   } else {
     dot.classList.add('stopped');
     label.textContent = sb.installed ? 'Sing-box 已停止' : 'Sing-box 待安装';
@@ -165,6 +167,7 @@ async function load(page = state.page) {
       state.inbounds = data.inbounds || [];
       state.outbounds = data.outbounds || [];
       state.certificates = data.certificates || [];
+      if (data.defaultSettings) state.defaultSettings = data.defaultSettings;
     } else if (page === 'outbounds') {
       const data = await api('/api/outbounds');
       state.outbounds = data.outbounds || [];
@@ -231,13 +234,14 @@ function renderOverview() {
   const diskUsed = sys.disk?.used || 0;
   const diskPct = sys.disk?.total ? Math.min(100, Math.round((diskUsed / diskTotal) * 100)) : 0;
   const sb = sys.singbox || { state: 'stop', version: '未安装' };
+  const accel = sys.acceleration || {};
 
   const metrics = [
     ['入站节点', counts.inbounds || 0, `${counts.activeInbounds || 0} 个运行中`, '#3478ee'],
-    ['活跃客户端', counts.clients || 0, '独立凭据与订阅分发', '#159f70'],
+    ['活跃客户端', counts.clients || 0, '支持在线 IP/设备数限制', '#159f70'],
     ['中转与出站', counts.outbounds || 0, `${counts.relayBindings || 0} 条入站直绑中转`, '#8a4ef7'],
     ['分流规则', counts.rules || 0, '3x-ui 风格域名/IP/协议分流', '#e8a63c'],
-    ['SSL 证书', counts.certificates || 0, 'ACME 自动续签与自签证书', '#d84d61']
+    ['SSL 证书', counts.certificates || 0, '面板与节点一站式通用', '#d84d61']
   ];
 
   const barClass = (pct) => (pct >= 88 ? 'crit' : pct >= 70 ? 'warn' : '');
@@ -255,7 +259,7 @@ function renderOverview() {
   return `
     ${ov.local3xuiExists ? `
       <div class="notice" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-        <div><b>检测到本机存在 3x-ui 数据库 (/etc/x-ui/x-ui.db)</b> · 可一键无损迁移全部入站节点、客户端凭据、中转出站与分流规则到 Sing-box。</div>
+        <div><b>检测到本机存在 3x-ui 数据 (/etc/x-ui/x-ui.db 或 /root/3xui_backup.tar.gz)</b> · 可一键无损迁移全部入站节点、客户端凭据、中转出站与分流规则到 Sing-box。</div>
         <button class="primary" data-action="jump-migrate">前往一键无损迁移 →</button>
       </div>
     ` : ''}
@@ -308,6 +312,18 @@ function renderOverview() {
             <div><span class="muted">累计总流量</span><strong style="margin-top:3px">↑ ${fmtBytes(sys.netTraffic?.sent || 0)} · ↓ ${fmtBytes(sys.netTraffic?.recv || 0)}</strong></div>
             <div><span class="muted">连接数 / 公网 IP</span><strong style="margin-top:3px">TCP ${sys.tcpCount || 0} / UDP ${sys.udpCount || 0} · ${esc(sys.publicIP?.ipv4 || '127.0.0.1')}</strong></div>
           </div>
+
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+            <div style="font-size:12px">
+              <b>内核加速状态:</b>
+              <span class="tag ${accel.bbrEnabled ? 'tls' : ''}">TCP: ${esc(accel.congestion || 'cubic')} + ${esc(accel.qdisc || 'fq')}</span>
+              <span class="tag ${accel.hy2Tuned ? 'tls' : ''}">HY2 UDP 缓冲: ${fmtBytes(accel.rmemMax || 0)}</span>
+            </div>
+            <div style="display:flex;gap:6px">
+              <button class="primary" data-action="enable-bbr-hy2">🚀 一键开启 BBR+FQ+HY2 加速</button>
+              <button data-action="open-firewall-ports">🛡 一键放行所有节点端口</button>
+            </div>
+          </div>
         </div>
       </article>
 
@@ -359,11 +375,11 @@ function renderOverview() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>最近操作审计日志</h2><p>记录面板登录、节点变更、中转配置与 3x-ui 迁移事件</p></div>
+        <div><h2>最近操作审计日志</h2><p>记录面板登录、节点变更、BBR 加速、中转配置与 3x-ui 迁移事件</p></div>
         <button class="ghost" data-action="quick-add-inbound">＋ 快速新建入站节点</button>
       </div>
       <div class="panel-body">
-        ${auditHtml || `<div class="empty"><b>暂无操作记录</b><span>创建节点或导入配置后将在此显示</span></div>`}
+        ${auditHtml || '<div class="empty"><b>暂无操作记录</b><span>创建节点或导入配置后将在此显示</span></div>'}
       </div>
     </section>
   `;
@@ -384,17 +400,21 @@ function renderInbounds() {
       ? `<small>转发目标: ${esc(item.overrideAddress || '未设')}:${esc(item.overridePort || 0)} (${esc(item.network || 'tcp,udp')})</small>`
       : '';
 
-    let relayHtml = `<span class="tag">默认路由</span>`;
+    let relayHtml = '<span class="tag">默认路由</span>';
     if (item.outboundTag && item.outboundTag !== 'default') {
       if (item.outboundTag === 'direct') {
-        relayHtml = `<span class="tag tls">本地直连 (direct)</span>`;
+        relayHtml = '<span class="tag tls">本地直连 (direct)</span>';
       } else if (item.outboundTag === 'block') {
-        relayHtml = `<span class="status disabled">黑洞拦截</span>`;
+        relayHtml = '<span class="status disabled">黑洞拦截</span>';
       } else {
         const targetOut = state.outbounds.find((o) => o.tag === item.outboundTag);
         relayHtml = `<span class="tag relay">⇄ 中转: ${esc(targetOut ? targetOut.remark : item.outboundTag)}</span>`;
       }
     }
+
+    const limitIp = Number(item.limitIp || 0);
+    const activeIpCount = Number(item.activeIpCount || 0);
+    const totalQuota = item.total > 0 ? ` / 限额 ${fmtBytes(item.total)}` : '';
 
     return `
       <tr>
@@ -410,8 +430,8 @@ function renderInbounds() {
         <td><strong>:${esc(item.port)}</strong></td>
         <td>${relayHtml}</td>
         <td>
-          <strong>${(item.clients || []).length} 个客户端</strong>
-          <small>↑ ${fmtBytes(item.up)} · ↓ ${fmtBytes(item.down)}</small>
+          <strong>↑ ${fmtBytes(item.up)} · ↓ ${fmtBytes(item.down)}${esc(totalQuota)}</strong>
+          <small>在线设备 IP: <b>${activeIpCount}</b> / ${limitIp > 0 ? `限制 ${limitIp} 台` : '不限'}${(item.activeIps && item.activeIps.length) ? ` (${esc(item.activeIps.join(', '))})` : ''}</small>
         </td>
         <td>
           <span class="status ${item.enable !== false ? 'active' : 'disabled'}">
@@ -422,6 +442,7 @@ function renderInbounds() {
           <div class="actions">
             ${item.protocol !== 'direct' ? `<button class="primary" data-action="inbound-links" data-id="${esc(item.id)}">链接 / 二维码</button>` : ''}
             <button data-action="edit-inbound" data-id="${esc(item.id)}">编辑</button>
+            <button data-action="reset-inbound-traffic" data-id="${esc(item.id)}" title="清零流量统计">清零</button>
             <button data-action="toggle-inbound" data-id="${esc(item.id)}">${item.enable !== false ? '停用' : '启用'}</button>
             <button class="danger" data-action="delete-inbound" data-id="${esc(item.id)}">删除</button>
           </div>
@@ -432,8 +453,11 @@ function renderInbounds() {
 
   return `
     <div class="page-intro">
-      <p>支持搭建 VLESS (Reality/TLS/WS/gRPC)、AnyTLS、Hysteria 2 (HY2)、SS AES-128/256-GCM、SS 2022 (128/256)、SOCKS5、Trojan、VMess、TUIC 及 Direct 端口转发。每个入站均可直接绑定中转出站节点。</p>
-      <button class="primary" data-action="add-inbound">＋ 新建入站节点</button>
+      <p>支持搭建 VLESS (Reality/TLS/WS/gRPC)、AnyTLS、Hysteria 2 (HY2)、SS AES-128/256-GCM、SS 2022 (128/256)、SOCKS5、Trojan、VMess、TUIC 及 Direct 端口转发。支持限制每个节点的在线 IP 设备数与流量配额，并一键生成全客户端兼容链接与二维码。</p>
+      <div style="display:flex;gap:8px">
+        <button data-action="copy-all-links">📋 一键复制全部节点链接</button>
+        <button class="primary" data-action="add-inbound">＋ 新建入站节点</button>
+      </div>
     </div>
 
     <div class="quick-bar">
@@ -463,13 +487,13 @@ function renderInbounds() {
               <th>协议与传输</th>
               <th>端口</th>
               <th>出站 / 中转绑定</th>
-              <th>客户端与流量</th>
+              <th>流量统计与在线 IP 限制</th>
               <th>状态</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            ${rows || `<tr><td colspan="7"><div class="empty"><b>还没有入站节点</b><span>点击上方“⚡ 快捷模板”或“＋ 新建入站节点”可在数秒内完成部署</span></div></td></tr>`}
+            ${rows || '<tr><td colspan="7"><div class="empty"><b>还没有入站节点</b><span>点击上方“⚡ 快捷模板”或“＋ 新建入站节点”可在数秒内完成部署</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -492,6 +516,13 @@ function renderOutbounds() {
           ? `包含节点: ${(item.outbounds || []).join(', ')}`
           : `${item.server || '—'}:${item.port || '—'}`);
 
+    const pingInfo = state.outboundPings[item.id];
+    const pingBadge = pingInfo
+      ? (pingInfo.reachable
+          ? `<span class="status valid">${pingInfo.latencyMs} ms</span>`
+          : `<span class="status error" title="${esc(pingInfo.error)}">超时/不通</span>`)
+      : '';
+
     return `
       <tr>
         <td>
@@ -504,7 +535,7 @@ function renderOutbounds() {
           ${detourBadge}
         </td>
         <td>
-          <strong>${esc(addrText)}</strong>
+          <strong>${esc(addrText)}</strong> ${pingBadge}
           ${item.method ? `<small>加密: ${esc(item.method)}</small>` : ''}
         </td>
         <td>
@@ -518,6 +549,7 @@ function renderOutbounds() {
         <td>
           <div class="actions">
             ${item.builtin ? '<small class="muted">系统保留</small>' : `
+              ${item.server ? `<button data-action="ping-outbound" data-id="${esc(item.id)}">⚡ 测速</button>` : ''}
               <button data-action="edit-outbound" data-id="${esc(item.id)}">编辑</button>
               <button class="danger" data-action="delete-outbound" data-id="${esc(item.id)}">删除</button>
             `}
@@ -529,8 +561,9 @@ function renderOutbounds() {
 
   return `
     <div class="page-intro">
-      <p>管理中转落地节点与外部代理出站。支持直接粘贴外部节点的分享链接（vless://、ss://、hy2://、anytls://、trojan://、vmess://、socks5://、tuic://）一键解析为 Sing-box 出站，并在入站节点或分流规则中绑定中转。</p>
-      <div style="display:flex;gap:8px">
+      <p>管理中转落地节点与外部代理出站。支持直接粘贴外部节点的分享链接（vless://、ss://、hy2://、anytls://、trojan://、vmess://、socks5://、tuic://）一键解析为 Sing-box 出站，并支持一键测试本机到落地机的 TCP 延迟。</p>
+      <div style="display:flex;flex-wrap:wrap;gap:8px">
+        <button data-action="ping-all-outbounds">⚡ 批量检测全部出站延迟</button>
         <button data-action="import-outbound-uri">🔗 粘贴节点链接一键导入</button>
         <button class="primary" data-action="add-outbound">＋ 手动添加出站节点</button>
       </div>
@@ -549,7 +582,7 @@ function renderOutbounds() {
             <tr>
               <th>出站备注 / Tag</th>
               <th>协议类型</th>
-              <th>目标落地地址 / 参数</th>
+              <th>目标落地地址 / 延迟</th>
               <th>关联中转入站</th>
               <th>状态</th>
               <th>操作</th>
@@ -582,7 +615,7 @@ function renderRouting() {
     if (r.protocol?.length) conds.push(`协议: ${r.protocol.join(', ')}`);
     if (r.network) conds.push(`网络: ${r.network.toUpperCase()}`);
     if (r.rule_set?.length) conds.push(`规则集: ${r.rule_set.join(', ')}`);
-    if (r.ip_is_private) conds.push(`私有内网 IP (ip_is_private)`);
+    if (r.ip_is_private) conds.push('私有内网 IP (ip_is_private)');
 
     const targetHtml = r.action === 'sniff'
       ? '<span class="tag">协议嗅探 (Sniff)</span>'
@@ -668,7 +701,7 @@ function renderRouting() {
             </tr>
           </thead>
           <tbody>
-            ${rows || `<tr><td colspan="6"><div class="empty"><b>暂无自定义分流规则</b><span>可点击上方快捷模板或添加规则</span></div></td></tr>`}
+            ${rows || '<tr><td colspan="6"><div class="empty"><b>暂无自定义分流规则</b><span>可点击上方快捷模板或添加规则</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -710,7 +743,7 @@ function renderMigrate() {
 
   return `
     <div class="page-intro">
-      <p>完全兼容 3x-ui 的 SQLite 数据库 (<code>x-ui.db</code>) 与 Xray 配置文件。无损迁移全部入站节点（保留原端口、UUID、密码、Reality 公私钥、shortIds、TLS 证书路径、客户端流量与到期时间）、Dokodemo 端口转发、全部中转出站及路由分流规则。</p>
+      <p>完全兼容 3x-ui 的 SQLite 数据库 (<code>x-ui.db</code>)、打包备份文件 (如 <code>3xui_backup.tar.gz</code>) 与 Xray 配置文件。无损迁移全部入站节点（保留原端口、UUID、密码、Reality 公私钥、shortIds、TLS 证书路径、客户端 IP 限制与流量）、Dokodemo 端口转发、全部中转出站及路由分流规则。</p>
     </div>
 
     ${previewHtml}
@@ -718,13 +751,13 @@ function renderMigrate() {
     <section class="grid-2">
       <article class="panel">
         <div class="panel-head">
-          <div><h2>方式一：上传 x-ui.db 数据库文件或读取本机 3x-ui</h2><p>推荐直接上传备份的 /etc/x-ui/x-ui.db 文件</p></div>
+          <div><h2>方式一：上传 x-ui.db / 3xui_backup.tar.gz 或读取本机</h2><p>支持直接上传 x-ui.db 数据库或 .tar.gz 压缩备份包</p></div>
         </div>
         <div class="panel-body stack">
           <label class="upload-dropzone" for="xui-db-file">
-            <input type="file" id="xui-db-file" accept=".db,.sqlite,.sqlite3,.json" class="hidden">
-            <b style="display:block;font-size:15px;margin-bottom:6px">📁 点击选择或拖拽上传 3x-ui 的 <code>x-ui.db</code> 数据库文件</b>
-            <span class="muted" style="font-size:12px" id="xui-file-label">支持 SQLite3 数据库文件 (x-ui.db) 或 JSON 配置文件</span>
+            <input type="file" id="xui-db-file" accept=".db,.sqlite,.sqlite3,.gz,.tgz,.json" class="hidden">
+            <b style="display:block;font-size:15px;margin-bottom:6px">📁 点击选择或拖拽上传 <code>x-ui.db</code> 或 <code>3xui_backup.tar.gz</code></b>
+            <span class="muted" style="font-size:12px" id="xui-file-label">支持 SQLite3 数据库 (x-ui.db)、.tar.gz 备份包或 JSON 文件</span>
           </label>
 
           <label>
@@ -742,12 +775,12 @@ function renderMigrate() {
 
           <div style="padding-top:12px;border-top:1px solid var(--line)">
             <label>
-              或者直接从本机路径读取 <code>x-ui.db</code>
+              或者直接从服务器本机路径读取 (支持 <code>/etc/x-ui/x-ui.db</code> 或 <code>/root/3xui_backup.tar.gz</code>)
               <div class="input-row" style="margin-top:4px">
-                <input id="local-xui-path" value="/etc/x-ui/x-ui.db" placeholder="/etc/x-ui/x-ui.db">
+                <input id="local-xui-path" value="/etc/x-ui/x-ui.db" placeholder="/etc/x-ui/x-ui.db 或 /root/3xui_backup.tar.gz">
                 <button class="primary" data-action="migrate-local-xui">一键迁移本机 3x-ui</button>
               </div>
-              <small>本机状态: ${state.overview?.local3xuiExists ? '✅ 已检测到 /etc/x-ui/x-ui.db' : '未在默认路径检测到 /etc/x-ui/x-ui.db（可填入自定义路径或上传文件）'}</small>
+              <small>本机状态: ${state.overview?.local3xuiExists ? '✅ 已检测到本机 3x-ui 数据库或备份包' : '可填入服务器上的 .db 或 .tar.gz 路径一键读取'}</small>
             </label>
           </div>
         </div>
@@ -778,7 +811,7 @@ function renderMigrate() {
         <table>
           <thead><tr><th>迁移时间</th><th>模式</th><th>入站与客户端</th><th>迁移出站</th><th>迁移分流规则</th></tr></thead>
           <tbody>
-            ${historyRows || `<tr><td colspan="5"><div class="empty"><b>尚无迁移记录</b><span>上传 x-ui.db 或粘贴 JSON 后将在此记录</span></div></td></tr>`}
+            ${historyRows || '<tr><td colspan="5"><div class="empty"><b>尚无迁移记录</b><span>上传 x-ui.db 或粘贴 JSON 后将在此记录</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -796,6 +829,7 @@ function renderCertificates() {
 
   const certRows = (state.certificates || []).map((c) => {
     const isPanelCert = s.webCertFile === c.certPath;
+    const isNodeDefault = s.defaultCertFile === c.certPath;
     return `
       <tr>
         <td>
@@ -804,10 +838,11 @@ function renderCertificates() {
         </td>
         <td>
           <span class="tag">${esc(c.type || 'cert')}</span>
-          ${isPanelCert ? '<span class="tag tls">当前面板 HTTPS 证书</span>' : ''}
+          ${isPanelCert ? '<span class="tag tls">面板 HTTPS</span>' : ''}
+          ${isNodeDefault ? '<span class="tag relay">节点默认证书</span>' : ''}
         </td>
         <td>
-          <small>证书: <code>${esc(c.certPath)}</code></small>
+          <small>公钥: <code>${esc(c.certPath)}</code></small>
           <small>私钥: <code>${esc(c.keyPath)}</code></small>
         </td>
         <td>
@@ -819,8 +854,8 @@ function renderCertificates() {
         </td>
         <td>
           <div class="actions">
-            <button data-action="apply-cert-panel" data-cert="${esc(c.certPath)}" data-key="${esc(c.keyPath)}">设为面板 HTTPS</button>
-            <button class="danger" data-action="delete-cert" data-id="${esc(c.id)}">移除记录</button>
+            <button class="primary" data-action="bind-cert-all" data-id="${esc(c.id)}">设为面板与节点通用证书</button>
+            <button class="danger" data-action="delete-cert" data-id="${esc(c.id)}">移除</button>
           </div>
         </td>
       </tr>
@@ -829,23 +864,23 @@ function renderCertificates() {
 
   return `
     <div class="page-intro">
-      <p>集中管理用于 AnyTLS、Hysteria 2、VLESS-TLS、Trojan、TUIC 入站节点以及面板 HTTPS 的 SSL 证书；同时提供多格式聚合订阅链接。</p>
+      <p>类似 3x-ui，申请或生成 SSL 证书后会自动同步绑定为**面板 HTTPS 证书**与**所有 TLS 节点（AnyTLS / Hysteria 2 / VLESS-TLS / Trojan / TUIC）的默认证书**，新建节点时无需再次手动填写路径。同时自动扫描并导入本机 <code>/root/cert/*</code> 下已有的 3x-ui 证书。</p>
       <div style="display:flex;flex-wrap:wrap;gap:8px">
-        <button data-action="cert-selfsigned">⚡ 一键生成 10 年自签证书</button>
+        <button data-action="cert-selfsigned">⚡ 一键生成 10 年自签证书 (免域名)</button>
         <button data-action="cert-custom">📋 粘贴 / 导入已有证书</button>
-        <button class="primary" data-action="cert-acme">🌐 ACME 自动申请证书 (域名/IP)</button>
+        <button class="primary" data-action="cert-acme">🌐 ACME 自动申请证书 (域名 / CF DNS / IP证书)</button>
       </div>
     </div>
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>SSL 证书列表 (${state.certificates.length} 张)</h2><p>在创建 AnyTLS、Hysteria 2 或 TLS 节点时可直接下拉选择此处已管理的证书</p></div>
+        <div><h2>SSL 证书管理列表 (${state.certificates.length} 张)</h2><p>当前节点默认 TLS 域名: <b>${esc(s.defaultTlsDomain || s.webDomain || 'www.bing.com')}</b></p></div>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>域名 / 标识</th><th>类型</th><th>文件路径</th><th>到期时间 / 签发者</th><th>状态</th><th>操作</th></tr></thead>
+          <thead><tr><th>域名 / 标识</th><th>用途与类型</th><th>证书文件路径</th><th>到期时间 / 签发者</th><th>状态</th><th>操作</th></tr></thead>
           <tbody>
-            ${certRows || `<tr><td colspan="6"><div class="empty"><b>尚未添加自定义或 ACME 证书</b><span>点击右上角“⚡ 一键生成 10 年自签证书”或“🌐 ACME 自动申请证书”即可创建</span></div></td></tr>`}
+            ${certRows || '<tr><td colspan="6"><div class="empty"><b>尚未添加自定义或 ACME 证书</b><span>点击右上角“⚡ 一键生成 10 年自签证书”或“🌐 ACME 自动申请证书”即可一键配置面板与节点证书</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -853,36 +888,37 @@ function renderCertificates() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>全客户端聚合订阅中心</h2><p>自动聚合所有已启用入站节点的客户端链接，支持按客户端 User-Agent 自动识别或通过参数指定格式</p></div>
+        <div><h2>全客户端聚合订阅中心</h2><p>自动聚合所有已启用入站节点的客户端链接，支持 Shadowrocket、v2rayN、v2rayNG、NekoBox、Clash Verge / Mihomo、Sing-box、Stash、Surge、Hiddify、Karing</p></div>
       </div>
       <div class="panel-body">
         <div class="subscription-row">
           <div>
-            <b>V2Ray / Shadowrocket / 通用 Base64 订阅</b>
+            <b>V2Ray / Shadowrocket / NekoBox / v2rayN 通用 Base64 订阅</b>
             <code>${esc(baseSubUrl)}</code>
           </div>
           <div style="display:flex;gap:6px">
             <button class="primary" data-copy="${esc(baseSubUrl)}">复制订阅链接</button>
-            <button data-qr="${esc(baseSubUrl)}">二维码</button>
+            <button data-qr="${esc(baseSubUrl)}">扫码导入</button>
           </div>
         </div>
         <div class="subscription-row">
           <div>
-            <b>Clash / Mihomo 智能分流 YAML 订阅 (含 AnyTLS / HY2 / Reality)</b>
+            <b>Clash Verge / Mihomo / Stash 智能分流 YAML 订阅 (含自动测速策略组)</b>
             <code>${esc(`${baseSubUrl}?format=clash`)}</code>
           </div>
           <div style="display:flex;gap:6px">
             <button class="primary" data-copy="${esc(`${baseSubUrl}?format=clash`)}">复制 Clash 订阅</button>
-            <button data-qr="${esc(`${baseSubUrl}?format=clash`)}">二维码</button>
+            <button data-qr="${esc(`${baseSubUrl}?format=clash`)}">扫码导入</button>
           </div>
         </div>
         <div class="subscription-row">
           <div>
-            <b>Sing-box 客户端 JSON 配置订阅</b>
+            <b>Sing-box (SFI / SFA / SFM) 客户端完整 JSON 订阅</b>
             <code>${esc(`${baseSubUrl}?format=singbox`)}</code>
           </div>
           <div style="display:flex;gap:6px">
             <button class="primary" data-copy="${esc(`${baseSubUrl}?format=singbox`)}">复制 Sing-box 订阅</button>
+            <button data-qr="${esc(`${baseSubUrl}?format=singbox`)}">扫码导入</button>
           </div>
         </div>
       </div>
@@ -915,7 +951,6 @@ function renderSettings() {
           <label>
             面板监听 IP (webListen)
             <input name="webListen" value="${esc(s.webListen || '0.0.0.0')}" placeholder="0.0.0.0 或 ::" required>
-            <small>默认 0.0.0.0 监听全部网卡；仅本机反代可填 127.0.0.1</small>
           </label>
           <label>
             面板监听端口 (webPort)
@@ -923,7 +958,6 @@ function renderSettings() {
               <input name="webPort" id="setting-webport" type="number" min="1" max="65535" value="${esc(s.webPort || 2053)}" required>
               <button type="button" data-action="random-port">🎲 随机端口</button>
             </div>
-            <small>类似 3x-ui，建议使用 10000–60000 之间的随机高位端口</small>
           </label>
 
           <label class="wide">
@@ -933,30 +967,34 @@ function renderSettings() {
               <button type="button" data-action="random-path">🎲 随机安全路径</button>
               <button type="button" data-action="reset-path">设为 /</button>
             </div>
-            <small>设置非 <code>/</code> 的安全路径后，直接访问根路径将返回 404，防止面板被扫描探测</small>
+          </label>
+
+          <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
+            <input type="checkbox" name="strictBasePath" style="width:16px;min-height:16px" ${s.strictBasePath ? 'checked' : ''}>
+            <span>开启严格隐身模式（访问根路径 <code>/</code> 时直接返回 404，不自动跳转到安全路径）</span>
           </label>
 
           <label>
-            服务器公网 IPv4 (用于生成节点链接)
-            <input name="publicIPv4" value="${esc(s.publicIPv4 || '')}" placeholder="如 203.0.113.10">
+            服务器公网 IPv4 (用于生成节点连接地址)
+            <input name="publicIPv4" value="${esc(s.publicIPv4 || '')}" placeholder="如 216.23.82.153">
           </label>
           <label>
-            面板 / 节点默认域名 (webDomain)
-            <input name="webDomain" value="${esc(s.webDomain || '')}" placeholder="如 gate.example.com">
+            面板 / 节点真实域名 (webDomain，无域名可留空)
+            <input name="webDomain" value="${esc(s.webDomain || '')}" placeholder="如 gate.example.com (无域名请留空)">
           </label>
 
           <div class="section-title">面板 HTTPS (SSL 证书配置)</div>
           <label class="wide">
-            快速绑定已管理的 SSL 证书
+            快速选择已管理的 SSL 证书
             <select id="setting-cert-picker">${certSelectOpts}</select>
           </label>
           <label>
             面板公钥证书路径 (webCertFile)
-            <input name="webCertFile" id="setting-cert-file" value="${esc(s.webCertFile || '')}" placeholder="/etc/nexusgate/certs/.../fullchain.pem">
+            <input name="webCertFile" id="setting-cert-file" value="${esc(s.webCertFile || '')}" placeholder="留空则为 HTTP 模式">
           </label>
           <label>
             面板私钥文件路径 (webKeyFile)
-            <input name="webKeyFile" id="setting-key-file" value="${esc(s.webKeyFile || '')}" placeholder="/etc/nexusgate/certs/.../privkey.pem">
+            <input name="webKeyFile" id="setting-key-file" value="${esc(s.webKeyFile || '')}" placeholder="留空则为 HTTP 模式">
           </label>
 
           <div class="section-title">订阅与 Sing-box 联动</div>
@@ -1006,13 +1044,14 @@ function renderSettings() {
 
         <article class="panel">
           <div class="panel-head">
-            <div><h2>SSH 命令行管理菜单 (类似 3x-ui)</h2><p>在服务器 SSH 终端输入 <code>nexusgate</code> 或 <code>ng</code> 即可呼出交互式管理菜单</p></div>
+            <div><h2>3x-ui 风格 SSH 命令行管理菜单 (0-25 完整功能)</h2><p>在服务器 SSH 终端输入 <code>ng</code> 或 <code>nexusgate</code> 即可呼出完整管理面板</p></div>
           </div>
           <div class="panel-body">
-            <div class="command-item"><div><b>呼出交互式管理菜单</b><code>nexusgate</code> 或 <code>ng</code></div><button data-copy="nexusgate">复制</button></div>
-            <div class="command-item"><div><b>查看当前面板端口、安全路径与访问地址</b><code>nexusgate info</code></div><button data-copy="nexusgate info">复制</button></div>
-            <div class="command-item"><div><b>命令行重置账号密码 / 随机端口 / 安全路径</b><code>nexusgate account</code> / <code>nexusgate port</code></div><button data-copy="nexusgate port">复制</button></div>
-            <div class="command-item"><div><b>命令行一键无损迁移本机 3x-ui 数据库</b><code>nexusgate migrate</code></div><button data-copy="nexusgate migrate">复制</button></div>
+            <div class="command-item"><div><b>呼出 0-25 完整交互式管理菜单 (含 SSL / BBR+HY2 / 防火墙)</b><code>ng</code> 或 <code>nexusgate</code></div><button data-copy="ng">复制</button></div>
+            <div class="command-item"><div><b>查看当前面板完整登录链接、端口与证书状态</b><code>ng info</code></div><button data-copy="ng info">复制</button></div>
+            <div class="command-item"><div><b>一键开启 BBR + FQ + HY2 UDP 高速内核加速</b><code>ng bbr</code></div><button data-copy="ng bbr">复制</button></div>
+            <div class="command-item"><div><b>SSL 证书管理 (无域名十年自签 / ACME / CF DNS / IP证书)</b><code>ng cert</code></div><button data-copy="ng cert">复制</button></div>
+            <div class="command-item"><div><b>一键无损迁移本机 3x-ui 数据库或备份包</b><code>ng migrate</code></div><button data-copy="ng migrate">复制</button></div>
           </div>
         </article>
       </div>
@@ -1036,7 +1075,11 @@ function render() {
 /* ==================== MODALS & ACTIONS ==================== */
 
 async function openInboundModal(existing = null, preset = '') {
-  let item = existing ? JSON.parse(JSON.stringify(existing)) : {
+  const defTlsDomain = state.defaultSettings?.defaultTlsDomain || state.settings?.webDomain || 'www.bing.com';
+  const defCertFile = state.defaultSettings?.defaultCertFile || state.settings?.webCertFile || '';
+  const defKeyFile = state.defaultSettings?.defaultKeyFile || state.settings?.webKeyFile || '';
+
+  const item = existing ? JSON.parse(JSON.stringify(existing)) : {
     remark: '',
     tag: '',
     protocol: 'vless',
@@ -1048,6 +1091,11 @@ async function openInboundModal(existing = null, preset = '') {
     method: '2022-blake3-aes-128-gcm',
     password: '',
     outboundTag: 'default',
+    limitIp: 0,
+    total: 0,
+    tlsDomain: defTlsDomain,
+    certPath: defCertFile,
+    keyPath: defKeyFile,
     reality: {
       serverName: 'www.tesla.com',
       target: 'www.tesla.com:443',
@@ -1100,15 +1148,16 @@ async function openInboundModal(existing = null, preset = '') {
   ].join('');
 
   const certOpts = [
-    '<option value="">自动使用内置自签证书 / 填写下方路径</option>',
+    '<option value="">自动使用面板已绑定默认证书 / 10年自签证书</option>',
     ...(state.certificates || []).map((c) => `<option value="${esc(c.domain)}" data-cert="${esc(c.certPath)}" data-key="${esc(c.keyPath)}"${selected(c.domain, item.tlsDomain)}>${esc(c.domain)} (${esc(c.type)})</option>`)
   ].join('');
 
   const c0 = (item.clients && item.clients[0]) || {};
+  const totalGB = item.total > 0 ? Math.round(item.total / (1024 ** 3)) : 0;
 
   openModal(
     existing ? '编辑入站节点' : '新建入站节点',
-    existing ? `${existing.remark} (:${existing.port})` : '配置 Sing-box 入站协议与中转绑定',
+    existing ? `${existing.remark} (:${existing.port})` : '配置 Sing-box 入站协议、IP 设备数限制与中转绑定',
     `
     <form id="inbound-form" class="form-grid" data-id="${esc(existing?.id || '')}">
       <label>
@@ -1134,13 +1183,23 @@ async function openInboundModal(existing = null, preset = '') {
         </div>
       </label>
 
+      <label>
+        限制同时在线 IP / 设备数 (0 = 不限制)
+        <input name="limitIp" type="number" min="0" max="1000" value="${esc(item.limitIp || 0)}" placeholder="0 表示不限制设备数">
+        <small>超出设定 IP 数量的设备新连接将被自动实时断开</small>
+      </label>
+      <label>
+        总流量配额上限 (GB，0 = 不限制)
+        <input name="totalGB" type="number" min="0" value="${esc(totalGB)}" placeholder="0 表示不限流量">
+        <small>达到流量上限后自动停用该入站</small>
+      </label>
+
       <label class="wide">
         ⇄ 指定出站 / 中转落地节点绑定 (Inbound -> Outbound Relay)
         <select name="outboundTag">${outboundOpts}</select>
-        <small>若选择某个中转出站节点，进入此入站的所有流量将直接通过该出站节点转发（免去手动编写分流规则）。</small>
+        <small>若选择某个中转出站节点，进入此入站的所有流量将直接通过该出站节点转发。</small>
       </label>
 
-      <!-- Protocol Specific Fields -->
       <div id="inb-dynamic-fields" class="form-grid wide" style="margin:0"></div>
 
       <div class="form-actions">
@@ -1194,7 +1253,7 @@ async function openInboundModal(existing = null, preset = '') {
             <input name="password" id="inb-ss-pass" value="${esc(item.password || '')}" required>
             <button type="button" data-action="gen-ss-key">🔑 生成标准密钥</button>
           </div>
-          <small>SS 2022 要求 16 字节 (128位) 或 32 字节 (256位) Base64 密钥，点击右侧按钮自动生成。</small>
+          <small>已针对全客户端优化：单用户默认采用标准 SIP002 Base64 格式，Shadowrocket / v2rayN / Clash 直接可用。</small>
         </label>
         <label class="wide">
           客户端标识名称 (Email/Remark)
@@ -1221,7 +1280,7 @@ async function openInboundModal(existing = null, preset = '') {
 
     if (proto === 'anytls') {
       box.innerHTML = `
-        <div class="section-title">AnyTLS 认证与 TLS 证书配置</div>
+        <div class="section-title">AnyTLS 认证与 TLS 证书配置 (已自动预填面板默认证书)</div>
         <label>
           AnyTLS 访问密码
           <input name="password" value="${esc(item.password || c0.password || '')}" required>
@@ -1236,15 +1295,15 @@ async function openInboundModal(existing = null, preset = '') {
         </label>
         <label>
           TLS 域名 (SNI)
-          <input name="tlsDomain" id="inb-tls-domain" value="${esc(item.tlsDomain || state.settings.webDomain || 'www.bing.com')}">
+          <input name="tlsDomain" id="inb-tls-domain" value="${esc(item.tlsDomain || defTlsDomain)}">
         </label>
         <label>
-          证书路径 (留空自动使用内置自签证书)
-          <input name="certPath" id="inb-cert-path" value="${esc(item.certPath || '')}" placeholder="/etc/nexusgate/certs/.../fullchain.pem">
+          证书路径 (留空自动使用默认证书/10年自签)
+          <input name="certPath" id="inb-cert-path" value="${esc(item.certPath || defCertFile)}" placeholder="自动绑定默认证书">
         </label>
         <label>
           私钥路径
-          <input name="keyPath" id="inb-key-path" value="${esc(item.keyPath || '')}" placeholder="/etc/nexusgate/certs/.../privkey.pem">
+          <input name="keyPath" id="inb-key-path" value="${esc(item.keyPath || defKeyFile)}" placeholder="自动绑定默认私钥">
         </label>
       `;
       return;
@@ -1252,7 +1311,7 @@ async function openInboundModal(existing = null, preset = '') {
 
     if (proto === 'hysteria2') {
       box.innerHTML = `
-        <div class="section-title">Hysteria 2 (HY2 UDP) 认证与带宽配置</div>
+        <div class="section-title">Hysteria 2 (HY2 UDP) 认证与带宽配置 (已自动预填面板默认证书)</div>
         <label>
           HY2 认证密码
           <input name="password" value="${esc(item.password || c0.password || '')}" required>
@@ -1275,15 +1334,15 @@ async function openInboundModal(existing = null, preset = '') {
         </label>
         <label>
           TLS SNI 域名
-          <input name="tlsDomain" id="inb-tls-domain" value="${esc(item.tlsDomain || state.settings.webDomain || 'www.bing.com')}">
+          <input name="tlsDomain" id="inb-tls-domain" value="${esc(item.tlsDomain || defTlsDomain)}">
         </label>
         <label>
-          证书路径 (留空自动使用内置自签证书)
-          <input name="certPath" id="inb-cert-path" value="${esc(item.certPath || '')}">
+          证书路径 (留空自动使用默认证书/10年自签)
+          <input name="certPath" id="inb-cert-path" value="${esc(item.certPath || defCertFile)}">
         </label>
         <label>
           私钥路径
-          <input name="keyPath" id="inb-key-path" value="${esc(item.keyPath || '')}">
+          <input name="keyPath" id="inb-key-path" value="${esc(item.keyPath || defKeyFile)}">
         </label>
       `;
       return;
@@ -1316,7 +1375,7 @@ async function openInboundModal(existing = null, preset = '') {
         安全层加密 (Security)
         <select name="security" id="inb-sec-select">
           <option value="reality"${selected('reality', sec)}>Reality (免证书高隐蔽 · 推荐)</option>
-          <option value="tls"${selected('tls', sec)}>TLS (需证书或自签)</option>
+          <option value="tls"${selected('tls', sec)}>TLS (自动使用面板证书或10年自签)</option>
           <option value="none"${selected('none', sec)}>无加密 (None · 适合内网中转或外层反代)</option>
         </select>
       </label>
@@ -1379,22 +1438,22 @@ async function openInboundModal(existing = null, preset = '') {
           `;
         } else if (curSec === 'tls') {
           secBox.innerHTML = `
-            <div class="section-title">TLS 证书配置</div>
+            <div class="section-title">TLS 证书配置 (已自动预填面板默认证书)</div>
             <label>
               选择已管理证书
               <select id="inb-cert-select">${certOpts}</select>
             </label>
             <label>
               TLS SNI 域名
-              <input name="tlsDomain" id="inb-tls-domain" value="${esc(item.tlsDomain || state.settings.webDomain || '')}">
+              <input name="tlsDomain" id="inb-tls-domain" value="${esc(item.tlsDomain || defTlsDomain)}">
             </label>
             <label>
-              公钥证书路径 (留空自动使用自签证书)
-              <input name="certPath" id="inb-cert-path" value="${esc(item.certPath || '')}">
+              公钥证书路径 (留空自动使用默认证书)
+              <input name="certPath" id="inb-cert-path" value="${esc(item.certPath || defCertFile)}">
             </label>
             <label>
               私钥路径
-              <input name="keyPath" id="inb-key-path" value="${esc(item.keyPath || '')}">
+              <input name="keyPath" id="inb-key-path" value="${esc(item.keyPath || defKeyFile)}">
             </label>
           `;
         } else {
@@ -1431,26 +1490,36 @@ async function openInboundModal(existing = null, preset = '') {
 
 function openInboundLinksModal(inbound) {
   const links = inbound.links || [];
-  const rows = links.map((l, idx) => `
-    <div class="subscription-row">
-      <div>
-        <b>${esc(l.name)} (${esc(l.protocol.toUpperCase())})</b>
-        <code>${esc(l.uri)}</code>
+  const rows = links.map((l, idx) => {
+    const qrSvg = window.NexusGateQR ? window.NexusGateQR.svg(l.uri) : '';
+    return `
+      <div class="subscription-row">
+        <div>
+          <b>${esc(l.name)} (${esc(l.protocol.toUpperCase())})</b>
+          ${l.isSelfSigned && ['anytls', 'hysteria2', 'trojan', 'tuic', 'vless'].includes(l.protocol) && inbound.security === 'tls'
+            ? '<small style="color:var(--success)">✓ 已自动附加自签证书跳过校验参数 (insecure=1&allowInsecure=1)，各大客户端可直接扫码连接</small>'
+            : ''}
+          <code>${esc(l.uri)}</code>
+          ${l.altUri ? `<small>备用兼容链接: <code>${esc(l.altUri)}</code></small>` : ''}
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          <button class="primary" data-copy="${esc(l.uri)}">复制通用链接</button>
+          ${l.altUri ? `<button data-copy="${esc(l.altUri)}">复制备用链接</button>` : ''}
+          ${l.clashYaml ? `<button data-copy="${esc(l.clashYaml)}">复制 Clash YAML</button>` : ''}
+          ${l.singboxJson ? `<button data-copy="${esc(l.singboxJson)}">复制 Sing-box JSON</button>` : ''}
+          <button data-qr-inline="qr-box-${idx}" data-qr-text="${esc(l.uri)}">收起/展开二维码</button>
+        </div>
+        <div id="qr-box-${idx}" class="subscription-qr">${qrSvg}</div>
       </div>
-      <div style="display:flex;gap:6px">
-        <button class="primary" data-copy="${esc(l.uri)}">复制链接</button>
-        <button data-qr-inline="qr-box-${idx}" data-qr-text="${esc(l.uri)}">显示二维码</button>
-      </div>
-      <div id="qr-box-${idx}" class="subscription-qr hidden"></div>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 
   openModal(
-    `节点分享链接与二维码 · 端口 :${inbound.port}`,
-    inbound.remark,
+    `节点分享链接与客户端二维码 · 端口 :${inbound.port}`,
+    `${inbound.remark} (全面支持 Shadowrocket / v2rayN / v2rayNG / NekoBox / Mihomo / Sing-box / Hiddify)`,
     `
     <div class="stack">
-      ${rows || `<div class="empty"><b>该入站暂无可用客户端链接</b><span>请检查客户端是否已启用</span></div>`}
+      ${rows || '<div class="empty"><b>该入站暂无可用客户端链接</b><span>请检查客户端是否已启用</span></div>'}
     </div>
     `
   );
@@ -1564,6 +1633,11 @@ function openOutboundModal(existing = null) {
           <input name="publicKey" value="${esc(item.publicKey || '')}" placeholder="pbk 公钥">
           <input name="shortId" value="${esc(item.shortId || '')}" placeholder="sid" style="max-width:100px">
         </div>
+      </label>
+
+      <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
+        <input type="checkbox" name="insecure" style="width:16px;min-height:16px" ${item.insecure ? 'checked' : ''}>
+        <span>跳过落地节点 TLS 证书校验 (insecure=true，当落地节点使用自签证书时勾选)</span>
       </label>
 
       <div class="form-actions">
@@ -1680,7 +1754,7 @@ document.addEventListener('click', async (e) => {
   if (navBtn) { setPage(navBtn.dataset.page); return; }
 
   const copyBtn = e.target.closest('[data-copy]');
-  if (copyBtn) { copyText(copyBtn.dataset.copy, '链接/命令'); return; }
+  if (copyBtn) { copyText(copyBtn.dataset.copy, '链接/配置'); return; }
 
   const qrBtn = e.target.closest('[data-qr]');
   if (qrBtn && window.NexusGateQR) {
@@ -1705,8 +1779,22 @@ document.addEventListener('click', async (e) => {
 
   try {
     if (action === 'jump-migrate') { setPage('migrate'); }
+    else if (action === 'enable-bbr-hy2') {
+      const res = await api('/api/system/acceleration', { method: 'POST', body: JSON.stringify({ mode: 'all' }) });
+      toast(`🚀 已启用内核加速 (${res.acceleration?.congestion} + ${res.acceleration?.qdisc})`);
+      load('overview');
+    }
+    else if (action === 'open-firewall-ports') {
+      const res = await api('/api/system/firewall', { method: 'POST' });
+      toast(`🛡 已自动放行端口: ${(res.openedPorts || []).join(', ')}`);
+    }
     else if (action === 'quick-add-inbound' || action === 'add-inbound') { openInboundModal(); }
     else if (action === 'quick-inbound') { openInboundModal(null, actEl.dataset.preset); }
+    else if (action === 'copy-all-links') {
+      const allUris = state.inbounds.flatMap((i) => (i.links || []).map((l) => l.uri));
+      if (!allUris.length) { toast('当前暂无可复制的节点链接', true); return; }
+      copyText(allUris.join('\n'), `全部 ${allUris.length} 条节点链接`);
+    }
     else if (action === 'edit-inbound') {
       const inb = state.inbounds.find((x) => x.id === actEl.dataset.id);
       if (inb) openInboundModal(inb);
@@ -1714,6 +1802,11 @@ document.addEventListener('click', async (e) => {
     else if (action === 'inbound-links') {
       const inb = state.inbounds.find((x) => x.id === actEl.dataset.id);
       if (inb) openInboundLinksModal(inb);
+    }
+    else if (action === 'reset-inbound-traffic') {
+      await api(`/api/inbounds/${actEl.dataset.id}/reset-traffic`, { method: 'POST' });
+      toast('节点流量统计已清零');
+      load('inbounds');
     }
     else if (action === 'toggle-inbound') {
       await api(`/api/inbounds/${actEl.dataset.id}/toggle`, { method: 'POST' });
@@ -1748,6 +1841,28 @@ document.addEventListener('click', async (e) => {
       const out = state.outbounds.find((x) => x.id === actEl.dataset.id);
       if (out) openOutboundModal(out);
     }
+    else if (action === 'ping-outbound') {
+      const id = actEl.dataset.id;
+      const res = await api(`/api/outbounds/${id}/ping`, { method: 'POST' });
+      state.outboundPings[id] = res;
+      if (res.reachable) toast(`出站连通正常: ${res.latencyMs} ms`);
+      else toast(`出站连接失败: ${res.error}`, true);
+      render();
+    }
+    else if (action === 'ping-all-outbounds') {
+      const targets = state.outbounds.filter((o) => !o.builtin && o.server);
+      if (!targets.length) { toast('暂无可测速的远程出站节点', true); return; }
+      toast('正在并发检测全部出站节点延迟...');
+      await Promise.all(targets.map(async (o) => {
+        try {
+          state.outboundPings[o.id] = await api(`/api/outbounds/${o.id}/ping`, { method: 'POST' });
+        } catch (err) {
+          state.outboundPings[o.id] = { reachable: false, error: err.message };
+        }
+      }));
+      toast('全部出站延迟检测完成');
+      render();
+    }
     else if (action === 'delete-outbound') {
       if (!confirm('确认删除该出站节点？')) return;
       await api(`/api/outbounds/${actEl.dataset.id}`, { method: 'DELETE' });
@@ -1758,7 +1873,7 @@ document.addEventListener('click', async (e) => {
       openModal('一键导入外部节点作为中转出站', '粘贴节点分享链接 (URI)', `
         <form id="import-uri-form" class="form-grid">
           <label class="wide">
-            节点分享链接 (支持 vless://, ss://, hysteria2://, anytls://, trojan://, vmess://, socks5://, tuic://)
+            节点分享链接 (支持 vless://, ss://, hysteria2://, hy2://, anytls://, trojan://, vmess://, socks5://, socks://, tuic://)
             <textarea name="uri" placeholder="粘贴如 vless://... 或 ss://... 链接" required></textarea>
           </label>
           <label>自定义出站备注 (可选)<input name="remark" placeholder="留空自动使用链接内名称"></label>
@@ -1841,7 +1956,7 @@ document.addEventListener('click', async (e) => {
     else if (action === 'preview-xui-file' || action === 'apply-xui-file') {
       const fileInput = $('#xui-db-file');
       const file = fileInput?.files?.[0];
-      if (!file) { toast('请先选择要上传的 x-ui.db 文件', true); return; }
+      if (!file) { toast('请先选择要上传的 x-ui.db 或 .tar.gz 备份文件', true); return; }
       const mode = $('#migrate-mode')?.value || 'merge';
       const dryRun = action === 'preview-xui-file';
       const buf = await file.arrayBuffer();
@@ -1885,61 +2000,68 @@ document.addEventListener('click', async (e) => {
         render();
       } else {
         state.migrationPreview = null;
-        toast(`🎉 从 JSON 无损迁移完成！`);
+        toast('🎉 从 JSON 无损迁移完成！');
         load('migrate');
       }
     }
     else if (action === 'cert-selfsigned') {
-      openModal('一键生成自签 SSL 证书', '免域名快速生成 10 年有效期证书', `
+      openModal('一键生成 10 年自签 SSL 证书', '无域名即可用于面板 HTTPS 登录及 AnyTLS / HY2 / TUIC 节点', `
         <form id="cert-selfsigned-form" class="form-grid">
           <label class="wide">
-            伪装域名或公网 IP (Common Name / SAN)
+            伪装域名 (SNI / Common Name)
             <input name="domain" value="${esc(state.settings.webDomain || 'www.bing.com')}" required>
-            <small>可用于 Hysteria 2、AnyTLS、TUIC 入站或面板 HTTPS 访问</small>
+            <small>自动包含本机公网 IPv4 作为 SAN 扩展，生成后自动绑定至面板与所有 TLS 节点默认证书</small>
           </label>
           <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
-            <input type="checkbox" name="applyToPanel" style="width:16px;min-height:16px">
-            <span>同时将该证书设为当前面板的 HTTPS 证书</span>
+            <input type="checkbox" name="applyToPanel" style="width:16px;min-height:16px" checked>
+            <span>同时绑定为面板 HTTPS 登录证书与节点默认证书 (推荐)</span>
           </label>
           <div class="form-actions">
             <button type="button" data-close>取消</button>
-            <button type="submit" class="primary">立即生成证书</button>
+            <button type="submit" class="primary">立即生成 10 年证书并绑定</button>
           </div>
         </form>
       `);
     }
     else if (action === 'cert-acme') {
-      openModal('ACME 自动申请受信任证书', '支持 Let\'s Encrypt HTTP-01、Cloudflare DNS 与短期 IP 证书', `
+      openModal('ACME 自动申请受信任证书 (3x-ui 同款流程)', '签发后自动同步设为面板 HTTPS 与全部 TLS 节点默认证书', `
         <form id="cert-acme-form" class="form-grid">
           <label>
             申请域名或公网 IP
-            <input name="domain" placeholder="如 node.example.com" required>
+            <input name="domain" placeholder="如 node.example.com 或公网 IP" required>
           </label>
           <label>
             通知邮箱 (可选)
             <input name="email" placeholder="admin@example.com">
           </label>
           <label class="wide">
-            验证模式
+            申请模式
             <select name="mode">
-              <option value="standalone">HTTP-01 Standalone (需本机 80 端口公网可达)</option>
-              <option value="cf">Cloudflare DNS-01 (无需开放 80 端口，需填写 CF Token)</option>
-              <option value="ip">Let's Encrypt IP 短期证书 (3x-ui 同款 IP 证书，需 80 端口)</option>
+              <option value="standalone">1. 域名 HTTP-01 模式 (需本机 80 端口放行且域名已解析到本机)</option>
+              <option value="cf">2. Cloudflare DNS API 模式 (无需 80 端口，支持泛域名)</option>
+              <option value="ip">3. Let's Encrypt 短期 IP 证书模式 (无需域名，直接为公网 IP 签发受信任证书)</option>
             </select>
           </label>
-          <label class="wide">
-            Cloudflare API Token (仅 DNS-01 模式需要)
-            <input name="cfToken" type="password" placeholder="Edit zone DNS Token">
+          <label>
+            Cloudflare API Token (仅 CF 模式选填)
+            <input name="cfToken" type="password" placeholder="CF_Token (Edit zone DNS)">
+          </label>
+          <label>
+            或 CF Global API Key + 邮箱 (仅 CF 模式选填)
+            <div class="input-row">
+              <input name="cfKey" type="password" placeholder="CF_Key">
+              <input name="cfEmail" placeholder="CF 账号邮箱">
+            </div>
           </label>
           <div class="form-actions">
             <button type="button" data-close>取消</button>
-            <button type="submit" class="primary">开始签发并安装</button>
+            <button type="submit" class="primary">开始签发并一键绑定面板与节点</button>
           </div>
         </form>
       `);
     }
     else if (action === 'cert-custom') {
-      openModal('导入或粘贴自定义 SSL 证书', '支持粘贴 PEM 内容或指定服务器已有证书路径', `
+      openModal('导入或粘贴自定义 SSL 证书', '支持粘贴 PEM 内容或指定服务器已有证书路径 (如 /root/cert/...)', `
         <form id="cert-custom-form" class="form-grid">
           <label class="wide">
             域名或证书标识名称
@@ -1963,17 +2085,17 @@ document.addEventListener('click', async (e) => {
           </label>
           <div class="form-actions">
             <button type="button" data-close>取消</button>
-            <button type="submit" class="primary">保存并验证证书</button>
+            <button type="submit" class="primary">保存并一键绑定面板与节点</button>
           </div>
         </form>
       `);
     }
-    else if (action === 'apply-cert-panel') {
-      await api('/api/settings', {
-        method: 'PUT',
-        body: JSON.stringify({ webCertFile: actEl.dataset.cert, webKeyFile: actEl.dataset.key })
+    else if (action === 'bind-cert-all') {
+      await api('/api/certificates/bind-all', {
+        method: 'POST',
+        body: JSON.stringify({ id: actEl.dataset.id })
       });
-      toast('已绑定为面板 HTTPS 证书，服务正在平滑重启');
+      toast('已设为面板 HTTPS 与全部 TLS 节点的默认通用证书！');
       load('certificates');
     }
     else if (action === 'delete-cert') {
@@ -2071,6 +2193,8 @@ document.addEventListener('submit', async (e) => {
         protocol: data.protocol,
         listen: data.listen,
         port: Number(data.port),
+        limitIp: Number(data.limitIp || 0),
+        totalGB: Number(data.totalGB || 0),
         outboundTag: data.outboundTag,
         security: data.security || (['anytls', 'hysteria2', 'tuic'].includes(data.protocol) ? 'tls' : 'none'),
         transport: data.transport || 'tcp',
@@ -2115,11 +2239,15 @@ document.addEventListener('submit', async (e) => {
     }
     else if (form.id === 'outbound-form') {
       const id = form.dataset.id;
+      const payload = {
+        ...data,
+        insecure: form.querySelector('[name="insecure"]')?.checked || false
+      };
       if (id) {
-        await api(`/api/outbounds/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+        await api(`/api/outbounds/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
         toast('出站节点已更新');
       } else {
-        await api('/api/outbounds', { method: 'POST', body: JSON.stringify(data) });
+        await api('/api/outbounds', { method: 'POST', body: JSON.stringify(payload) });
         toast('出站节点已添加');
       }
       closeModal();
@@ -2155,25 +2283,29 @@ document.addEventListener('submit', async (e) => {
           applyToPanel: form.querySelector('[name="applyToPanel"]')?.checked || false
         })
       });
-      toast('10 年自签 SSL 证书已生成');
+      toast('10 年自签 SSL 证书已生成并自动绑定！');
       closeModal();
       load('certificates');
     }
     else if (form.id === 'cert-acme-form') {
       toast('正在调用 ACME 申请证书，请稍候...');
       await api('/api/certificates/acme', { method: 'POST', body: JSON.stringify(data) });
-      toast('ACME 证书签发成功！');
+      toast('ACME 证书签发成功并已同步绑定至面板与节点！');
       closeModal();
       load('certificates');
     }
     else if (form.id === 'cert-custom-form') {
       await api('/api/certificates/custom', { method: 'POST', body: JSON.stringify(data) });
-      toast('自定义证书已保存并验证通过');
+      toast('自定义证书已保存并绑定！');
       closeModal();
       load('certificates');
     }
     else if (form.id === 'settings-form') {
-      const res = await api('/api/settings', { method: 'PUT', body: JSON.stringify(data) });
+      const payload = {
+        ...data,
+        strictBasePath: form.querySelector('[name="strictBasePath"]')?.checked || false
+      };
+      const res = await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
       toast('面板设置已保存');
       const nextBase = (res.settings?.webBasePath || '/').replace(/\/+$/, '');
       if (nextBase !== BASE_PATH) {

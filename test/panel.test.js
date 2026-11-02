@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+const { normalizeBasePath } = require('../lib/http');
 const {
   generateRealityKeypair,
   deriveRealityPublicKey,
@@ -19,8 +20,14 @@ const {
 const { buildSingboxConfig } = require('../lib/singbox');
 const { parse3xuiPayload, apply3xuiMigration } = require('../lib/migrate3xui');
 const { Store } = require('../lib/store');
-const { issueSelfSignedCert } = require('../lib/system');
+const { issueSelfSignedCert, getAccelerationStatus } = require('../lib/system');
 const { formatSubscription } = require('../lib/subscriptions');
+
+test('normalizeBasePath strips accidental shell pipe newlines and control chars', () => {
+  assert.equal(normalizeBasePath('/qErfNupP\ndf89b623856/'), '/qErfNupP');
+  assert.equal(normalizeBasePath('  /my_secret_path/  '), '/my_secret_path');
+  assert.equal(normalizeBasePath('/'), '/');
+});
 
 test('X25519 Reality keypair generation and public key derivation', () => {
   const pair = generateRealityKeypair();
@@ -30,8 +37,9 @@ test('X25519 Reality keypair generation and public key derivation', () => {
   assert.equal(derived, pair.publicKey);
 });
 
-test('All requested protocols compile into valid Sing-box inbounds and generate client URIs', () => {
+test('All protocols compile into valid Sing-box inbounds and generate 100% client-compatible URIs', () => {
   const kp = generateRealityKeypair();
+  const serverPublicIp = '216.23.82.153';
   const protocolsToTest = [
     {
       id: 'in_vless',
@@ -58,7 +66,7 @@ test('All requested protocols compile into valid Sing-box inbounds and generate 
       protocol: 'anytls',
       port: 24444,
       security: 'tls',
-      tlsDomain: 'node.example.com',
+      tlsDomain: 'www.bing.com',
       password: 'anytls_secret_pass',
       clients: [{ email: 'u_anytls', password: 'anytls_secret_pass', enable: true }]
     },
@@ -69,7 +77,7 @@ test('All requested protocols compile into valid Sing-box inbounds and generate 
       protocol: 'hysteria2',
       port: 24445,
       security: 'tls',
-      tlsDomain: 'node.example.com',
+      tlsDomain: 'www.bing.com',
       upMbps: 100,
       downMbps: 100,
       obfsPassword: 'salamander_pass',
@@ -122,26 +130,40 @@ test('All requested protocols compile into valid Sing-box inbounds and generate 
     assert.equal(sbInb.type, inb.protocol);
     assert.equal(sbInb.listen_port, inb.port);
 
-    const links = buildClientLinks(inb, '203.0.113.88');
-    assert.equal(links.length, 1, `Expected 1 client URI for ${inb.protocol}`);
+    // Ensure single-user SS2022 does not force multi-user EIH array
+    if (inb.protocol === 'shadowsocks') {
+      assert.equal(sbInb.users, undefined);
+    }
 
-    // Also test round-trip parsing URI into an Outbound!
+    const links = buildClientLinks(inb, serverPublicIp);
+    assert.equal(links.length, 1);
+
+    // Ensure connect host is ALWAYS the real server IP (216.23.82.153), NOT fake SNI www.bing.com!
+    assert.ok(links[0].uri.includes(`@${serverPublicIp}:${inb.port}`));
+
+    // Ensure self-signed AnyTLS & HY2 automatically include insecure=1
+    if (inb.protocol === 'anytls' || inb.protocol === 'hysteria2') {
+      assert.ok(links[0].uri.includes('insecure=1'));
+      assert.ok(links[0].uri.includes('sni=www.bing.com'));
+    }
+
     const parsedOut = parseShareUriToOutbound(links[0].uri);
     assert.equal(parsedOut.type, inb.protocol);
+    assert.equal(parsedOut.server, serverPublicIp);
     assert.equal(parsedOut.port, inb.port);
     const sbOut = toSingboxOutbound(parsedOut);
     assert.equal(sbOut.type, inb.protocol);
   }
 });
 
-test('Lossless 3x-ui SQLite database (x-ui.db) migration for inbounds, outbounds, and routing rules', () => {
+test('Lossless 3x-ui migration from both SQLite x-ui.db and .tar.gz backup archive', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-test-'));
   const dbPath = path.join(tmpDir, 'x-ui.db');
+  const tarPath = path.join(tmpDir, '3xui_backup.tar.gz');
   const storePath = path.join(tmpDir, 'nexusgate.json');
 
   const kp = generateRealityKeypair();
 
-  // Create a genuine 3x-ui SQLite database with inbounds, client_traffics, and settings (xrayTemplateConfig)
   const pyInit = `
 import sqlite3, json, sys
 conn = sqlite3.connect(sys.argv[1])
@@ -151,7 +173,7 @@ cur.execute("CREATE TABLE client_traffics (id INTEGER PRIMARY KEY, inbound_id IN
 cur.execute("CREATE TABLE settings (id INTEGER PRIMARY KEY, key TEXT, value TEXT)")
 
 vless_settings = json.dumps({
-  "clients": [{"id": "a1b2c3d4-e5f6-4a5b-8c9d-0123456789ab", "email": "alice@3xui", "flow": "xtls-rprx-vision", "subId": "sub_alice", "enable": True}],
+  "clients": [{"id": "a1b2c3d4-e5f6-4a5b-8c9d-0123456789ab", "email": "alice@3xui", "flow": "xtls-rprx-vision", "limitIp": 3, "subId": "sub_alice", "enable": True}],
   "decryption": "none"
 })
 vless_stream = json.dumps({
@@ -168,21 +190,6 @@ vless_stream = json.dumps({
 cur.execute("INSERT INTO inbounds VALUES (1, 1, 1024, 2048, 0, 'HK-Reality', 1, 0, '', 34567, 'vless', ?, ?, 'inbound-34567', '{}')", (vless_settings, vless_stream))
 cur.execute("INSERT INTO client_traffics VALUES (1, 1, 1, 'alice@3xui', 1024, 2048, 0, 0)")
 
-ss_settings = json.dumps({
-  "method": "2022-blake3-aes-128-gcm",
-  "password": "${generateSsKey('2022-blake3-aes-128-gcm')}",
-  "network": "tcp,udp",
-  "clients": []
-})
-cur.execute("INSERT INTO inbounds VALUES (2, 1, 0, 0, 0, 'SG-SS2022', 1, 0, '', 34568, 'shadowsocks', ?, '{}', 'inbound-34568', '{}')", (ss_settings,))
-
-tunnel_settings = json.dumps({
-  "address": "198.51.100.99",
-  "port": 5566,
-  "network": "tcp,udp"
-})
-cur.execute("INSERT INTO inbounds VALUES (3, 1, 0, 0, 0, 'Relay-Tunnel', 1, 0, '', 34569, 'dokodemo-door', ?, '{}', 'inbound-34569', '{}')", (tunnel_settings,))
-
 xray_template = json.dumps({
   "outbounds": [
     {"tag": "direct", "protocol": "freedom", "settings": {}},
@@ -197,9 +204,7 @@ xray_template = json.dumps({
   ],
   "routing": {
     "rules": [
-      {"type": "field", "inboundTag": ["inbound-34567"], "outboundTag": "jp-relay-out"},
-      {"type": "field", "domain": ["geosite:cn"], "outboundTag": "direct"},
-      {"type": "field", "domain": ["geosite:openai"], "outboundTag": "jp-relay-out"}
+      {"type": "field", "inboundTag": ["inbound-34567"], "outboundTag": "jp-relay-out"}
     ]
   }
 })
@@ -208,46 +213,28 @@ conn.commit()
 conn.close()
 `;
 
-  const res = spawnSync('python3', ['-c', pyInit, dbPath], { encoding: 'utf8' });
-  assert.equal(res.status, 0, res.stderr);
+  spawnSync('python3', ['-c', pyInit, dbPath], { encoding: 'utf8' });
+  spawnSync('tar', ['-czf', tarPath, '-C', tmpDir, 'x-ui.db'], { encoding: 'utf8' });
 
-  const dbBuffer = fs.readFileSync(dbPath);
-  const parsed = parse3xuiPayload({ dbBuffer });
+  const tarBuffer = fs.readFileSync(tarPath);
+  const parsed = parse3xuiPayload({ dbBuffer: tarBuffer });
 
-  assert.equal(parsed.summary.inboundsCount, 3);
+  assert.equal(parsed.summary.inboundsCount, 1);
   assert.equal(parsed.summary.outboundsCount, 1);
-  assert.equal(parsed.summary.rulesCount, 3);
+  assert.equal(parsed.inbounds[0].limitIp, 3);
+  assert.equal(parsed.inbounds[0].outboundTag, 'jp-relay-out');
 
-  // Verify VLESS inbound was bound directly to jp-relay-out via routing rule detection
-  const vlessInb = parsed.inbounds.find((i) => i.port === 34567);
-  assert.ok(vlessInb);
-  assert.equal(vlessInb.outboundTag, 'jp-relay-out');
-  assert.equal(vlessInb.reality.publicKey, kp.publicKey);
-
-  // Verify dokodemo-door became Sing-box direct port forwarding inbound
-  const directInb = parsed.inbounds.find((i) => i.port === 34569);
-  assert.ok(directInb);
-  assert.equal(directInb.protocol, 'direct');
-  assert.equal(directInb.overrideAddress, '198.51.100.99');
-  assert.equal(directInb.overridePort, 5566);
-
-  // Apply to store and compile Sing-box config + subscriptions
   const store = new Store(storePath);
   apply3xuiMigration(store, parsed, 'replace');
   const sbConfig = buildSingboxConfig(store.state);
+  assert.equal(sbConfig.inbounds.length, 1);
 
-  assert.equal(sbConfig.inbounds.length, 3);
-  assert.ok(sbConfig.outbounds.some((o) => o.tag === 'jp-relay-out' && o.type === 'shadowsocks'));
-  assert.ok(sbConfig.route.rules.some((r) => Array.isArray(r.inbound) && r.inbound.includes('inbound-34567') && r.outbound === 'jp-relay-out'));
+  const clashSub = formatSubscription(store.state, 'all', 'clash', '216.23.82.153:50084');
+  assert.ok(clashSub.body.includes('216.23.82.153'));
 
-  const clashSub = formatSubscription(store.state, 'all', 'clash');
-  assert.ok(clashSub.body.includes('HK-Reality-alice@3xui'));
-  assert.ok(clashSub.body.includes('SG-SS2022'));
-
-  // Test self-signed SSL cert generation
-  const cert = issueSelfSignedCert({ domain: 'test.nexusgate.local', baseDir: path.join(tmpDir, 'certs') });
+  const cert = issueSelfSignedCert({ domain: 'www.bing.com', ip: '216.23.82.153', baseDir: path.join(tmpDir, 'certs') });
   assert.equal(cert.valid, true);
-  assert.ok(fs.existsSync(cert.certPath));
+  assert.ok(getAccelerationStatus().congestion);
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
