@@ -22,6 +22,7 @@ const {
   SS_METHODS,
   INBOUND_PROTOCOLS,
   OUTBOUND_PROTOCOLS,
+  ensureUuid,
   generateRealityKeypair,
   deriveRealityPublicKey,
   generateSsKey,
@@ -44,54 +45,27 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
 
 const store = new Store(DATA_FILE);
-
-function syncDiscoveredCerts() {
-  const discovered = discoverSystemCertificates();
-  if (!discovered.length) return;
-  let changed = false;
-  for (const d of discovered) {
-    const exists = store.state.certificates.some((c) => c.certPath === d.certPath || c.domain === d.domain);
-    if (!exists) {
-      store.state.certificates.push(d);
-      changed = true;
-    }
-  }
-  if (!store.state.settings.defaultCertFile && store.state.certificates[0]) {
-    const c0 = store.state.certificates[0];
-    store.state.settings.defaultTlsDomain = c0.domain;
-    store.state.settings.defaultCertFile = c0.certPath;
-    store.state.settings.defaultKeyFile = c0.keyPath;
-    changed = true;
-  }
-  if (changed) store.save();
-}
-
-syncDiscoveredCerts();
-
-// Handle CLI flags for `nexusgate` / `ng` management script
-if (process.argv.length > 2 && process.argv[2].startsWith('--')) {
-  handleCliCommand(process.argv.slice(2));
-  process.exit(0);
-}
-
 const sessions = new SessionManager(24);
 sessions.setMaxAgeMinutes(store.state.settings.sessionMaxAge || 720);
 const singbox = new SingboxManager(store);
 const loginAttempts = new Map();
 
 function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes = true) {
-  st.certificates = st.certificates.filter((c) => c.domain !== cert.domain && c.certPath !== cert.certPath);
+  // Remove legacy www.bing.com certs or duplicate entries
+  st.certificates = (st.certificates || []).filter(
+    (c) => c.domain !== 'www.bing.com' && c.domain !== cert.domain && c.certPath !== cert.certPath
+  );
   st.certificates.unshift(cert);
   if (applyToPanel) {
     st.settings.webCertFile = cert.certPath;
     st.settings.webKeyFile = cert.keyPath;
-    if (cert.type !== 'self-signed' && cert.domain && !cert.domain.includes('bing.com')) {
+    if (cert.type !== 'self-signed' && cert.domain && cert.domain !== 'www.apple.com') {
       st.settings.webDomain = cert.domain;
     }
   }
@@ -100,12 +74,118 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
     st.settings.defaultCertFile = cert.certPath;
     st.settings.defaultKeyFile = cert.keyPath;
     for (const inb of st.inbounds || []) {
-      if (inb.security === 'tls' && (!inb.certPath || inb.certPath.includes('selfsigned') || inb.certPath.includes('/panel/'))) {
+      if (inb.security === 'tls' && (!inb.certPath || inb.certPath.includes('selfsigned') || inb.certPath.includes('www.bing.com') || inb.tlsDomain === 'www.bing.com' || inb.tlsDomain === 'www.apple.com')) {
         inb.tlsDomain = cert.domain;
         inb.certPath = cert.certPath;
         inb.keyPath = cert.keyPath;
       }
     }
+  }
+}
+
+/**
+ * Discovers system certificates (/root/cert/* and /etc/nexusgate/certs/*)
+ * and automatically promotes any real ACME domain certificate over self-signed certificates!
+ */
+function syncDiscoveredCerts() {
+  const discovered = discoverSystemCertificates();
+  let changed = false;
+
+  // Purge any old www.bing.com self-signed cert from state
+  const beforeLen = store.state.certificates.length;
+  store.state.certificates = store.state.certificates.filter((c) => c.domain !== 'www.bing.com');
+  if (store.state.certificates.length !== beforeLen) changed = true;
+
+  for (const d of discovered) {
+    const exists = store.state.certificates.some((c) => c.certPath === d.certPath || c.domain === d.domain);
+    if (!exists) {
+      if (d.type !== 'self-signed') {
+        store.state.certificates.unshift(d);
+      } else {
+        store.state.certificates.push(d);
+      }
+      changed = true;
+    }
+  }
+
+  // If a real ACME/custom domain certificate exists, and current panel/node cert is empty or self-signed, auto-bind the real cert!
+  const bestRealCert = store.state.certificates.find((c) => c.type !== 'self-signed' && c.valid !== false);
+  if (bestRealCert) {
+    const curCert = store.state.settings.webCertFile || '';
+    const isCurSelfSigned = !curCert || curCert.includes('selfsigned') || curCert.includes('www.bing.com') || curCert.includes('www.apple.com');
+    if (isCurSelfSigned || store.state.settings.defaultTlsDomain === 'www.bing.com' || store.state.settings.defaultTlsDomain === 'www.apple.com') {
+      bindCertificateEverywhere(store.state, bestRealCert, true, true);
+      changed = true;
+    }
+  } else if (!store.state.settings.defaultCertFile && store.state.certificates[0]) {
+    const c0 = store.state.certificates[0];
+    store.state.settings.defaultTlsDomain = c0.domain;
+    store.state.settings.defaultCertFile = c0.certPath;
+    store.state.settings.defaultKeyFile = c0.keyPath;
+    changed = true;
+  }
+
+  if (changed) store.save();
+}
+
+syncDiscoveredCerts();
+
+// Handle CLI flags for `nexusgate` / `ng` management script AFTER `singbox` is initialized!
+if (process.argv.length > 2 && process.argv[2].startsWith('--')) {
+  handleCliCommand(process.argv.slice(2));
+  process.exit(0);
+}
+
+function syncInboundRelayToRoutingRule(st, inbound) {
+  if (!st.routing) st.routing = { final: 'direct', rules: [] };
+  if (!Array.isArray(st.routing.rules)) st.routing.rules = [];
+
+  // Find existing pure 1-to-1 relay rule for this inbound tag
+  const existingIdx = st.routing.rules.findIndex(
+    (r) => Array.isArray(r.inbound) && r.inbound.length === 1 && r.inbound[0] === inbound.tag &&
+      !r.domain?.length && !r.domain_suffix?.length && !r.ip_cidr?.length && !r.port?.length && !r.protocol?.length
+  );
+
+  if (inbound.outboundTag && inbound.outboundTag !== 'default') {
+    const relayRule = {
+      id: existingIdx >= 0 ? st.routing.rules[existingIdx].id : `rule_relay_${crypto.randomBytes(4).toString('hex')}`,
+      remark: `入站转发: ${inbound.remark} (${inbound.tag}) ➔ ${inbound.outboundTag}`,
+      enabled: true,
+      action: 'route',
+      inbound: [inbound.tag],
+      user: [],
+      domain: [],
+      domain_suffix: [],
+      domain_keyword: [],
+      ip_cidr: [],
+      source_ip_cidr: [],
+      port: [],
+      source_port: [],
+      network: '',
+      protocol: [],
+      rule_set: [],
+      ip_is_private: false,
+      outbound: inbound.outboundTag
+    };
+    if (existingIdx >= 0) {
+      st.routing.rules[existingIdx] = relayRule;
+    } else {
+      // Insert right after sniff rule so inbound relay rules sit at the top like 3x-ui
+      const sniffIdx = st.routing.rules.findIndex((r) => r.action === 'sniff');
+      st.routing.rules.splice(sniffIdx + 1, 0, relayRule);
+    }
+  } else if (existingIdx >= 0) {
+    st.routing.rules.splice(existingIdx, 1);
+  }
+}
+
+function syncRoutingRulesToInbounds(st) {
+  for (const inb of st.inbounds || []) {
+    const matchedRule = (st.routing?.rules || []).find(
+      (r) => r.enabled !== false && Array.isArray(r.inbound) && r.inbound.includes(inb.tag) &&
+        !r.domain?.length && !r.domain_suffix?.length && !r.ip_cidr?.length && !r.port?.length && !r.protocol?.length && !r.ip_is_private
+    );
+    inb.outboundTag = matchedRule ? matchedRule.outbound : 'default';
   }
 }
 
@@ -126,8 +206,9 @@ function handleCliCommand(args) {
       basePath: base,
       strictBasePath: Boolean(s.strictBasePath),
       https: useHttps,
+      webDomain: s.webDomain || '',
       certFile: s.webCertFile || '未绑定 (HTTP)',
-      defaultNodeTlsDomain: s.defaultTlsDomain || 'www.bing.com',
+      defaultNodeTlsDomain: s.defaultTlsDomain || s.webDomain || 'www.apple.com',
       url: cleanUrl,
       inboundsCount: store.state.inbounds.length,
       outboundsCount: store.state.outbounds.filter((o) => !o.builtin).length,
@@ -166,6 +247,7 @@ function handleCliCommand(args) {
     const base = normalizeBasePath(args[1] || '/');
     store.transact((st) => {
       st.settings.webBasePath = base;
+      st.settings.strictBasePath = true;
     });
     console.log(`面板安全根路径已更改为: ${base}`);
     return;
@@ -178,15 +260,25 @@ function handleCliCommand(args) {
         publicIPv4: st.settings.publicIPv4 || '',
         webPort: 2053,
         webBasePath: '/',
-        strictBasePath: false
+        strictBasePath: true
       };
     });
     console.log('面板设置已重置为默认状态 (端口: 2053, 路径: /)');
     return;
   }
   if (cmd === '--issue-selfsigned') {
-    const domain = String(args[1] || store.state.settings.webDomain || 'www.bing.com').trim();
+    const domain = String(args[1] || store.state.settings.webDomain || 'www.apple.com').trim();
     const ip = String(args[2] || store.state.settings.publicIPv4 || '').trim();
+    // If a real ACME cert already exists, prefer keeping it unless forced
+    const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && c.valid !== false);
+    if (realCert && args[3] !== '--force') {
+      store.transact((st) => {
+        bindCertificateEverywhere(st, realCert, true, true);
+      });
+      singbox.writeConfig();
+      console.log(`检测到已有受信任域名证书 (${realCert.domain})，已自动绑定为面板与节点默认证书: ${realCert.certPath}`);
+      return;
+    }
     const cert = issueSelfSignedCert({ domain, ip, days: 3650 });
     store.transact((st) => {
       bindCertificateEverywhere(st, cert, true, true);
@@ -213,7 +305,7 @@ function handleCliCommand(args) {
       }
     });
     singbox.writeConfig();
-    console.log(certFile ? `SSL 证书已成功绑定至面板与节点: ${certFile}` : '已关闭面板 HTTPS，恢复为 HTTP 访问');
+    console.log(certFile ? `SSL 证书已成功绑定至面板与全部 TLS 节点: ${certFile}` : '已关闭面板 HTTPS，恢复为 HTTP 访问');
     return;
   }
   if (cmd === '--migrate-3xui') {
@@ -236,7 +328,7 @@ function normalizeInboundPayload(body, existing = null) {
     throw err;
   }
 
-  const tag = String(body.tag || existing?.tag || `${protocol}-${port}`).trim();
+  const tag = String(body.tag || existing?.tag || `inbound-${port}`).trim();
   const remark = String(body.remark || existing?.remark || `${protocol.toUpperCase()}-${port}`).trim();
   const listen = String(body.listen || existing?.listen || '::').trim();
   const enable = body.enable !== undefined ? Boolean(body.enable) : (existing ? existing.enable !== false : true);
@@ -302,12 +394,14 @@ function normalizeInboundPayload(body, existing = null) {
   }
 
   if (security === 'tls') {
-    const defDomain = store.state.settings.defaultTlsDomain || store.state.settings.webDomain || 'www.bing.com';
-    const defCert = store.state.settings.defaultCertFile || store.state.settings.webCertFile || '';
-    const defKey = store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || '';
-    inbound.tlsDomain = String(body.tlsDomain ?? existing?.tlsDomain ?? defDomain).trim();
-    inbound.certPath = String(body.certPath ?? existing?.certPath ?? defCert).trim();
-    inbound.keyPath = String(body.keyPath ?? existing?.keyPath ?? defKey).trim();
+    const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && c.valid !== false);
+    const defDomain = realCert?.domain || store.state.settings.webDomain || store.state.settings.defaultTlsDomain || 'www.apple.com';
+    const defCert = realCert?.certPath || store.state.settings.defaultCertFile || store.state.settings.webCertFile || '';
+    const defKey = realCert?.keyPath || store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || '';
+    inbound.tlsDomain = String(body.tlsDomain || existing?.tlsDomain || defDomain).trim();
+    if (inbound.tlsDomain === 'www.bing.com') inbound.tlsDomain = defDomain;
+    inbound.certPath = String(body.certPath || existing?.certPath || defCert).trim();
+    inbound.keyPath = String(body.keyPath || existing?.keyPath || defKey).trim();
     inbound.allowInsecure = Boolean(body.allowInsecure ?? existing?.allowInsecure ?? false);
     inbound.alpn = Array.isArray(body.alpn)
       ? body.alpn
@@ -331,19 +425,19 @@ function normalizeInboundPayload(body, existing = null) {
     inbound.password = String(body.password || existing?.password || generateSsKey(inbound.method)).trim();
     inbound.network = String(body.network || existing?.network || 'tcp,udp').trim();
   } else if (protocol === 'hysteria2') {
-    inbound.password = String(body.password || existing?.password || randomString(18)).trim();
+    inbound.password = String(body.password || existing?.password || randomString(20)).trim();
     inbound.upMbps = Number(body.upMbps ?? existing?.upMbps ?? 100);
     inbound.downMbps = Number(body.downMbps ?? existing?.downMbps ?? 100);
     inbound.obfsPassword = String(body.obfsPassword ?? existing?.obfsPassword ?? '').trim();
   } else if (protocol === 'anytls') {
-    inbound.password = String(body.password || existing?.password || randomString(18)).trim();
+    inbound.password = String(body.password || existing?.password || randomString(20)).trim();
   } else if (protocol === 'socks') {
-    inbound.socksUser = String(body.socksUser ?? existing?.socksUser ?? `user_${randomString(4)}`).trim();
-    inbound.socksPassword = String(body.socksPassword ?? existing?.socksPassword ?? randomString(12)).trim();
+    inbound.socksUser = String(body.socksUser ?? existing?.socksUser ?? `user_${randomString(6)}`).trim();
+    inbound.socksPassword = String(body.socksPassword ?? existing?.socksPassword ?? randomString(16)).trim();
   } else if (protocol === 'trojan') {
-    inbound.password = String(body.password || existing?.password || randomString(18)).trim();
+    inbound.password = String(body.password || existing?.password || randomString(20)).trim();
   } else if (protocol === 'tuic') {
-    inbound.password = String(body.password || existing?.password || randomString(16)).trim();
+    inbound.password = String(body.password || existing?.password || randomString(18)).trim();
     inbound.congestionControl = String(body.congestionControl || existing?.congestionControl || 'bbr').trim();
   } else if (protocol === 'direct') {
     inbound.overrideAddress = String(body.overrideAddress ?? existing?.overrideAddress ?? '').trim();
@@ -351,14 +445,15 @@ function normalizeInboundPayload(body, existing = null) {
     inbound.network = String(body.network ?? existing?.network ?? 'tcp,udp').trim();
   }
 
+  // Strictly ensure valid UUIDs for VLESS/VMess/TUIC clients!
   if (Array.isArray(body.clients) && body.clients.length > 0) {
     inbound.clients = body.clients.map((c, i) => ({
-      id: c.id || c.uuid || crypto.randomUUID(),
+      id: ensureUuid(c.id || c.uuid),
       email: String(c.email || c.name || `${remark}_${i + 1}`).trim(),
       username: String(c.username || c.email || `user_${i + 1}`).trim(),
-      password: String(c.password || inbound.password || inbound.socksPassword || generateSsKey(inbound.method || 'aes-128-gcm')).trim(),
+      password: String(c.password || inbound.password || inbound.socksPassword || randomString(18)).trim(),
       flow: c.flow !== undefined ? c.flow : (inbound.flow || ''),
-      subId: String(c.subId || randomString(10)).trim(),
+      subId: String(c.subId || randomString(12)).trim(),
       limitIp: Number(c.limitIp ?? inbound.limitIp ?? 0),
       totalGB: Number(c.totalGB || 0),
       up: Number(c.up || 0),
@@ -369,7 +464,7 @@ function normalizeInboundPayload(body, existing = null) {
   } else if (existing?.clients?.length && !body.resetClients) {
     inbound.clients = existing.clients.map((c, idx) => ({
       ...c,
-      id: idx === 0 && body.uuid ? body.uuid : c.id,
+      id: ensureUuid(idx === 0 && body.uuid ? body.uuid : c.id),
       email: idx === 0 && body.clientEmail ? body.clientEmail : c.email,
       limitIp: inbound.limitIp,
       flow: inbound.protocol === 'vless' ? (inbound.flow ?? c.flow ?? '') : c.flow,
@@ -380,12 +475,12 @@ function normalizeInboundPayload(body, existing = null) {
   } else if (protocol !== 'direct') {
     inbound.clients = [
       {
-        id: body.uuid || crypto.randomUUID(),
-        email: body.clientEmail || `${tag}_default`,
-        username: inbound.socksUser || `user_${randomString(4)}`,
-        password: inbound.password || inbound.socksPassword || generateSsKey(inbound.method || 'aes-128-gcm'),
+        id: ensureUuid(body.uuid),
+        email: body.clientEmail || `${tag}_user`,
+        username: inbound.socksUser || `user_${randomString(6)}`,
+        password: inbound.password || inbound.socksPassword || randomString(18),
         flow: inbound.flow || '',
-        subId: randomString(10),
+        subId: randomString(12),
         limitIp: inbound.limitIp,
         totalGB: 0,
         up: 0,
@@ -418,7 +513,7 @@ function normalizeOutboundPayload(body, existing = null) {
     detour: String(body.detour ?? existing?.detour ?? '').trim(),
     security: String(body.security ?? existing?.security ?? (['anytls', 'hysteria2', 'tuic'].includes(type) ? 'tls' : 'none')).toLowerCase(),
     transport: String(body.transport ?? existing?.transport ?? 'tcp').toLowerCase(),
-    uuid: String(body.uuid ?? existing?.uuid ?? '').trim(),
+    uuid: body.uuid || existing?.uuid ? ensureUuid(body.uuid || existing?.uuid) : '',
     password: String(body.password ?? existing?.password ?? '').trim(),
     method: String(body.method ?? existing?.method ?? '2022-blake3-aes-128-gcm').trim(),
     username: String(body.username ?? existing?.username ?? '').trim(),
@@ -434,6 +529,8 @@ function normalizeOutboundPayload(body, existing = null) {
     upMbps: Number(body.upMbps ?? existing?.upMbps ?? 0),
     downMbps: Number(body.downMbps ?? existing?.downMbps ?? 0),
     obfsPassword: String(body.obfsPassword ?? existing?.obfsPassword ?? '').trim(),
+    up: Number(body.up ?? existing?.up ?? 0),
+    down: Number(body.down ?? existing?.down ?? 0),
     outbounds: Array.isArray(body.outbounds)
       ? body.outbounds
       : String(body.outbounds || (existing?.outbounds || []).join(','))
@@ -445,7 +542,8 @@ function normalizeOutboundPayload(body, existing = null) {
 
 function enrichInboundWithLinks(inbound, reqHost = '') {
   const cleanReqHost = String(reqHost || '').split(':')[0].replace(/^\[|\]$/g, '');
-  const defaultHost = store.state.settings.publicIPv4 || store.state.settings.webDomain || cleanReqHost || '127.0.0.1';
+  const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && c.valid !== false);
+  const defaultHost = store.state.settings.webDomain || realCert?.domain || store.state.settings.publicIPv4 || cleanReqHost || '127.0.0.1';
   const activeIps = singbox.getActiveIpsForInbound(inbound.tag);
   return {
     ...inbound,
@@ -504,7 +602,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    // 3. Enforce or Smart-Redirect webBasePath for Panel UI & API
+    // 3. Enforce webBasePath (Strict by default: bare IP:Port returns 404 Not Found unless /<webBasePath>/ is used!)
     const basePath = normalizeBasePath(store.state.settings.webBasePath || '/');
     if (basePath !== '/' && rawPathname === basePath && !rawPathname.endsWith('/')) {
       res.writeHead(302, { location: `${basePath}/` });
@@ -514,8 +612,7 @@ async function handleRequest(req, res) {
 
     let pathname = stripBasePath(rawPathname, basePath);
     if (pathname === null) {
-      // Allow direct fallback if /api/ or static asset is requested from root, OR redirect browser navigation to basePath!
-      if (!store.state.settings.strictBasePath) {
+      if (store.state.settings.strictBasePath === false) {
         if (rawPathname.startsWith('/api/') || rawPathname === '/styles.css' || rawPathname === '/app.js' || rawPathname.startsWith('/vendor/')) {
           pathname = rawPathname;
         } else if (method === 'GET') {
@@ -535,7 +632,6 @@ async function handleRequest(req, res) {
     if (method === 'GET' && !pathname.startsWith('/api/')) {
       const served = await serveStatic(PUBLIC_DIR, pathname, res, basePath);
       if (served) return;
-      // If user pasted an extra suffix in browser URL (e.g. /basePath/something), redirect cleanly to /basePath/
       if (!path.extname(pathname)) {
         res.writeHead(302, { location: basePath === '/' ? '/' : `${basePath}/` });
         res.end();
@@ -602,8 +698,9 @@ async function handleRequest(req, res) {
       }
     }
 
-    // 7. Overview & System Status + BBR/HY2 Acceleration & Firewall
+    // 7. Overview & System Status
     if (pathname === '/api/overview' && method === 'GET') {
+      syncDiscoveredCerts();
       const system = getSystemStatus(singbox, store.state.settings);
       const inbounds = store.state.inbounds || [];
       const outbounds = store.state.outbounds || [];
@@ -659,28 +756,32 @@ async function handleRequest(req, res) {
     if (pathname === '/api/tools/reality-keypair' && method === 'POST') {
       return sendJson(res, 200, {
         ...generateRealityKeypair(),
-        shortId: generateShortId()
+        shortId: generateShortId(),
+        uuid: crypto.randomUUID()
       });
     }
 
     if (pathname === '/api/tools/ss-key' && method === 'POST') {
       const body = await readJson(req);
       return sendJson(res, 200, {
-        password: generateSsKey(body.method || '2022-blake3-aes-128-gcm')
+        password: generateSsKey(body.method || '2022-blake3-aes-128-gcm'),
+        uuid: crypto.randomUUID()
       });
     }
 
-    // 8. Inbounds CRUD & IP/Traffic Management
+    // 8. Inbounds CRUD
     if (pathname === '/api/inbounds' && method === 'GET') {
       syncDiscoveredCerts();
+      const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && c.valid !== false);
       return sendJson(res, 200, {
         inbounds: (store.state.inbounds || []).map((i) => enrichInboundWithLinks(i, reqHostHeader)),
         outbounds: store.state.outbounds || [],
         certificates: store.state.certificates || [],
+        settings: store.state.settings || {},
         defaultSettings: {
-          defaultTlsDomain: store.state.settings.defaultTlsDomain || store.state.settings.webDomain || 'www.bing.com',
-          defaultCertFile: store.state.settings.defaultCertFile || store.state.settings.webCertFile || '',
-          defaultKeyFile: store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || ''
+          defaultTlsDomain: realCert?.domain || store.state.settings.webDomain || store.state.settings.defaultTlsDomain || 'www.apple.com',
+          defaultCertFile: realCert?.certPath || store.state.settings.defaultCertFile || store.state.settings.webCertFile || '',
+          defaultKeyFile: realCert?.keyPath || store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || ''
         }
       });
     }
@@ -694,6 +795,7 @@ async function handleRequest(req, res) {
       }
       store.transact((st) => {
         st.inbounds.unshift(inbound);
+        syncInboundRelayToRoutingRule(st, inbound);
         store.addAudit(session.username, 'create_inbound', `${inbound.remark} (${inbound.protocol}:${inbound.port})`);
       });
       openFirewallPorts([inbound.port]);
@@ -714,6 +816,7 @@ async function handleRequest(req, res) {
       store.transact((st) => {
         const idx = st.inbounds.findIndex((x) => x.id === existing.id);
         st.inbounds[idx] = updated;
+        syncInboundRelayToRoutingRule(st, updated);
         store.addAudit(session.username, 'update_inbound', `${updated.remark} (${updated.protocol}:${updated.port})`);
       });
       openFirewallPorts([updated.port]);
@@ -726,6 +829,7 @@ async function handleRequest(req, res) {
       if (!existing) return sendError(res, 404, '未找到该入站节点');
       store.transact((st) => {
         st.inbounds = st.inbounds.filter((x) => x.id !== inbMatch.id);
+        st.routing.rules = (st.routing.rules || []).filter((r) => !(Array.isArray(r.inbound) && r.inbound.length === 1 && r.inbound[0] === existing.tag));
         store.addAudit(session.username, 'delete_inbound', `${existing.remark} (:${existing.port})`);
       });
       autoApplyIfEnabled();
@@ -757,11 +861,12 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing, reqHostHeader) });
     }
 
-    // 9. Outbounds & Relay CRUD + TCP Latency Test
+    // 9. Outbounds & Relay CRUD + Batch URI Import + Traffic Reset
     if (pathname === '/api/outbounds' && method === 'GET') {
       return sendJson(res, 200, {
         outbounds: store.state.outbounds || [],
-        inbounds: store.state.inbounds || []
+        inbounds: store.state.inbounds || [],
+        routing: store.state.routing || { final: 'direct', rules: [] }
       });
     }
 
@@ -769,7 +874,7 @@ async function handleRequest(req, res) {
       const body = await readJson(req);
       const outbound = normalizeOutboundPayload(body);
       if (store.state.outbounds.some((o) => o.tag === outbound.tag)) {
-        return sendError(res, 400, `出站标识 Tag [${outbound.tag}] 已存在`);
+        return sendError(res, 400, `出站标签 Tag [${outbound.tag}] 已存在`);
       }
       store.transact((st) => {
         st.outbounds.push(outbound);
@@ -781,16 +886,28 @@ async function handleRequest(req, res) {
 
     if (pathname === '/api/outbounds/import-uri' && method === 'POST') {
       const body = await readJson(req);
-      const outbound = parseShareUriToOutbound(body.uri, body.tag, body.remark);
-      if (store.state.outbounds.some((o) => o.tag === outbound.tag)) {
-        outbound.tag = `${outbound.tag}-${randomString(3).toLowerCase()}`;
-      }
+      const lines = String(body.uri || '')
+        .split(/[\r\n]+/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (!lines.length) return sendError(res, 400, '请粘贴至少一条节点分享链接');
+
+      const imported = [];
       store.transact((st) => {
-        st.outbounds.push(outbound);
-        store.addAudit(session.username, 'import_outbound_uri', `${outbound.remark} (${outbound.type})`);
+        lines.forEach((line, idx) => {
+          const customTag = lines.length === 1 ? body.tag : (body.tag ? `${body.tag}-${idx + 1}` : '');
+          const customRemark = lines.length === 1 ? body.remark : (body.remark ? `${body.remark}-${idx + 1}` : '');
+          const outbound = parseShareUriToOutbound(line, customTag, customRemark);
+          while (st.outbounds.some((o) => o.tag === outbound.tag)) {
+            outbound.tag = `${outbound.tag}-${randomString(3).toLowerCase()}`;
+          }
+          st.outbounds.push(outbound);
+          imported.push(outbound);
+        });
+        store.addAudit(session.username, 'import_outbound_uri', `批量导入 ${imported.length} 个出站节点`);
       });
       autoApplyIfEnabled();
-      return sendJson(res, 201, { outbound });
+      return sendJson(res, 201, { imported, count: imported.length });
     }
 
     const outPing = route('/api/outbounds/:id/ping', pathname);
@@ -799,6 +916,18 @@ async function handleRequest(req, res) {
       if (!existing || !existing.server) return sendError(res, 404, '该出站无远程服务器地址');
       const ping = await tcpPingHostPort(existing.server, existing.port || 443);
       return sendJson(res, 200, { id: existing.id, tag: existing.tag, ...ping });
+    }
+
+    const outReset = route('/api/outbounds/:id/reset-traffic', pathname);
+    if (outReset && method === 'POST') {
+      const existing = store.state.outbounds.find((x) => x.id === outReset.id);
+      if (!existing) return sendError(res, 404, '未找到该出站节点');
+      store.transact(() => {
+        existing.up = 0;
+        existing.down = 0;
+        store.addAudit(session.username, 'reset_outbound_traffic', existing.tag);
+      });
+      return sendJson(res, 200, { outbound: existing });
     }
 
     const outMatch = route('/api/outbounds/:id', pathname);
@@ -825,19 +954,20 @@ async function handleRequest(req, res) {
         for (const inb of st.inbounds) {
           if (inb.outboundTag === existing.tag) inb.outboundTag = 'default';
         }
+        st.routing.rules = (st.routing.rules || []).filter((r) => r.outbound !== existing.tag);
         store.addAudit(session.username, 'delete_outbound', `${existing.remark} (${existing.tag})`);
       });
       autoApplyIfEnabled();
       return sendJson(res, 200, { ok: true });
     }
 
-    // 10. Routing & Diversion
+    // 10. Routing & Diversion (3x-ui 路由规则模式)
     if (pathname === '/api/routing' && method === 'GET') {
       return sendJson(res, 200, {
         routing: store.state.routing,
         dns: store.state.dns,
         inbounds: store.state.inbounds.map((i) => ({ id: i.id, tag: i.tag, remark: i.remark, port: i.port, protocol: i.protocol, outboundTag: i.outboundTag })),
-        outbounds: store.state.outbounds.map((o) => ({ id: o.id, tag: o.tag, remark: o.remark, type: o.type }))
+        outbounds: store.state.outbounds.map((o) => ({ id: o.id, tag: o.tag, remark: o.remark, type: o.type, server: o.server, port: o.port }))
       });
     }
 
@@ -857,10 +987,11 @@ async function handleRequest(req, res) {
       const splitList = (v) => (Array.isArray(v) ? v : String(v || '').split(',').map((s) => s.trim()).filter(Boolean));
       const newRule = {
         id: `rule_${crypto.randomBytes(5).toString('hex')}`,
-        remark: String(body.remark || '自定义分流规则').trim(),
+        remark: String(body.remark || (body.inbound ? `入站 ${body.inbound} ➔ ${body.outbound}` : '分流规则')).trim(),
         enabled: body.enabled !== false,
         action: body.action || 'route',
         inbound: splitList(body.inbound),
+        user: splitList(body.user),
         domain: splitList(body.domain),
         domain_suffix: splitList(body.domain_suffix),
         domain_keyword: splitList(body.domain_keyword),
@@ -876,6 +1007,7 @@ async function handleRequest(req, res) {
       };
       store.transact((st) => {
         st.routing.rules.push(newRule);
+        syncRoutingRulesToInbounds(st);
         store.addAudit(session.username, 'create_route_rule', `${newRule.remark} -> ${newRule.outbound}`);
       });
       autoApplyIfEnabled();
@@ -895,6 +1027,7 @@ async function handleRequest(req, res) {
           remark: body.remark !== undefined ? String(body.remark).trim() : existing.remark,
           enabled: body.enabled !== undefined ? Boolean(body.enabled) : existing.enabled,
           inbound: body.inbound !== undefined ? splitList(body.inbound) : existing.inbound,
+          user: body.user !== undefined ? splitList(body.user) : (existing.user || []),
           domain: body.domain !== undefined ? splitList(body.domain) : existing.domain,
           domain_suffix: body.domain_suffix !== undefined ? splitList(body.domain_suffix) : existing.domain_suffix,
           domain_keyword: body.domain_keyword !== undefined ? splitList(body.domain_keyword) : existing.domain_keyword,
@@ -908,6 +1041,7 @@ async function handleRequest(req, res) {
           ip_is_private: body.ip_is_private !== undefined ? Boolean(body.ip_is_private) : existing.ip_is_private,
           outbound: body.outbound !== undefined ? String(body.outbound).trim() : existing.outbound
         };
+        syncRoutingRulesToInbounds(st);
         store.addAudit(session.username, 'update_route_rule', st.routing.rules[idx].remark);
       });
       autoApplyIfEnabled();
@@ -917,6 +1051,7 @@ async function handleRequest(req, res) {
     if (ruleMatch && method === 'DELETE') {
       store.transact((st) => {
         st.routing.rules = st.routing.rules.filter((r) => r.id !== ruleMatch.id);
+        syncRoutingRulesToInbounds(st);
         store.addAudit(session.username, 'delete_route_rule', ruleMatch.id);
       });
       autoApplyIfEnabled();
@@ -926,14 +1061,19 @@ async function handleRequest(req, res) {
     const ruleMove = route('/api/routing/rules/:id/move', pathname);
     if (ruleMove && method === 'POST') {
       const body = await readJson(req);
-      const dir = body.direction === 'up' ? -1 : 1;
+      const direction = body.direction || 'up';
       store.transact((st) => {
         const idx = st.routing.rules.findIndex((r) => r.id === ruleMove.id);
-        const targetIdx = idx + dir;
-        if (idx >= 0 && targetIdx >= 0 && targetIdx < st.routing.rules.length) {
-          const tmp = st.routing.rules[idx];
-          st.routing.rules[idx] = st.routing.rules[targetIdx];
-          st.routing.rules[targetIdx] = tmp;
+        if (idx < 0) return;
+        const [item] = st.routing.rules.splice(idx, 1);
+        if (direction === 'top') {
+          st.routing.rules.unshift(item);
+        } else if (direction === 'bottom') {
+          st.routing.rules.push(item);
+        } else if (direction === 'up') {
+          st.routing.rules.splice(Math.max(0, idx - 1), 0, item);
+        } else {
+          st.routing.rules.splice(Math.min(st.routing.rules.length, idx + 1), 0, item);
         }
       });
       autoApplyIfEnabled();
@@ -1114,7 +1254,7 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { version: ver, status: singbox.getStatus() });
     }
 
-    // 13. SSL Certificates Management (One-stop panel + node auto-binding)
+    // 13. SSL Certificates Management
     if (pathname === '/api/certificates' && method === 'GET') {
       syncDiscoveredCerts();
       const certs = (store.state.certificates || []).map((c) => ({
@@ -1127,7 +1267,7 @@ async function handleRequest(req, res) {
     if (pathname === '/api/certificates/self-signed' && method === 'POST') {
       const body = await readJson(req);
       const cert = issueSelfSignedCert({
-        domain: body.domain || store.state.settings.webDomain || 'www.bing.com',
+        domain: body.domain || store.state.settings.webDomain || 'www.apple.com',
         ip: store.state.settings.publicIPv4 || '',
         days: Number(body.days || 3650)
       });

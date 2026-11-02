@@ -20,10 +20,9 @@ warn() { echo -e "${yellow}[提示]${plain} $*"; }
 
 need_root() { [[ "${EUID}" -eq 0 ]] || die "请使用 root 权限运行此命令"; }
 
-# Safe random string generator without SIGPIPE
 gen_random_str() {
-  local len="${1:-8}"
-  openssl rand -base64 48 2>/dev/null | tr -dc 'a-zA-Z0-9' | cut -c1-"$len" | tr -d '\r\n '
+  local len="${1:-16}"
+  openssl rand -base64 64 2>/dev/null | tr -dc 'a-zA-Z0-9' | cut -c1-"$len" | tr -d '\r\n '
 }
 
 pause_return() {
@@ -80,13 +79,16 @@ show_info() {
 
 change_account() {
   need_root
+  local rand_u="ng_$(gen_random_str 10)"
+  local rand_p="$(gen_random_str 18)"
   local u="" p=""
-  read -r -p "请输入新的管理员账号 [默认 admin]: " u </dev/tty
-  u="${u:-admin}"
-  read -r -p "请输入新的管理员密码: " p </dev/tty
-  [[ -n "$p" ]] || die "密码不能为空"
+  read -r -p "请输入新的管理员账号 [直接回车使用随机账号 ${rand_u}]: " u </dev/tty
+  u="${u:-$rand_u}"
+  read -r -p "请输入新的管理员密码 [直接回车使用 18 位随机密码 ${rand_p}]: " p </dev/tty
+  p="${p:-$rand_p}"
+  systemctl stop nexusgate.service 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-account "$u" "$p"
-  systemctl restart nexusgate.service 2>/dev/null || true
+  systemctl start nexusgate.service 2>/dev/null || true
   ok "管理员账号密码已重置！账号: ${u}  密码: ${p}"
   show_info
 }
@@ -94,13 +96,14 @@ change_account() {
 change_path() {
   need_root
   local rand_str
-  rand_str="$(gen_random_str 8)"
+  rand_str="$(gen_random_str 16)"
   local bp=""
-  read -r -p "请输入新的面板访问根路径 [直接回车使用随机路径 /${rand_str}/ ，输入 / 则不设后缀]: " bp </dev/tty
+  read -r -p "请输入新的面板安全根路径 [直接回车使用 16 位随机路径 /${rand_str}/ ]: " bp </dev/tty
   bp="${bp:-/$rand_str/}"
+  systemctl stop nexusgate.service 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-path "$bp"
-  systemctl restart nexusgate.service 2>/dev/null || true
-  ok "面板访问路径已更新！"
+  systemctl start nexusgate.service 2>/dev/null || true
+  ok "面板安全访问路径已更新！(单 IP+端口 已禁止访问，请使用下方完整安全路径地址)"
   show_info
 }
 
@@ -108,8 +111,9 @@ reset_settings() {
   need_root
   read -r -p "确定要重置面板端口(2053)与访问根路径(/)为默认设置吗？(不会删除节点数据) [y/N]: " c </dev/tty
   [[ "$c" =~ ^[Yy]$ ]] || return 0
+  systemctl stop nexusgate.service 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --reset-settings
-  systemctl restart nexusgate.service 2>/dev/null || true
+  systemctl start nexusgate.service 2>/dev/null || true
   ok "面板设置已重置！"
   show_info
 }
@@ -120,13 +124,14 @@ change_port() {
   local p=""
   read -r -p "请输入新的面板端口 [直接回车使用随机端口 ${rand_port}]: " p </dev/tty
   p="${p:-$rand_port}"
+  systemctl stop nexusgate.service 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-port "$p"
   if command -v ufw >/dev/null 2>&1; then ufw allow "${p}/tcp" >/dev/null 2>&1 || true; fi
   if command -v firewall-cmd >/dev/null 2>&1; then
     firewall-cmd --permanent --add-port="${p}/tcp" >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
-  systemctl restart nexusgate.service 2>/dev/null || true
+  systemctl start nexusgate.service 2>/dev/null || true
   ok "面板端口已更改为: ${p}"
   show_info
 }
@@ -145,10 +150,10 @@ ssl_cert_menu() {
   need_root
   while true; do
     echo ""
-    echo -e "${cyan}---------------- SSL 证书管理 (面板与节点一站式通用) ----------------${plain}"
+    echo -e "${cyan}---------------- SSL 证书管理 (申请后自动设为面板与全部节点默认证书) ----------------${plain}"
     echo -e "  ${green}1.${plain} 获取 SSL 证书 (ACME 域名 80 端口 HTTP-01 模式，自动绑定面板与节点)"
     echo -e "  ${green}2.${plain} 获取 Let's Encrypt IP 短期证书 (无需域名，直接为公网 IP 签发受信任证书)"
-    echo -e "  ${green}3.${plain} 无域名一键生成 10 年自签 SSL 证书 (含公网 IP，自动绑定面板与全部节点)"
+    echo -e "  ${green}3.${plain} 无域名一键生成 10 年自签 SSL 证书 (含公网 IP，自动绑定面板与节点)"
     echo -e "  ${green}4.${plain} 撤销已申请的 ACME 证书"
     echo -e "  ${green}5.${plain} 强制更新 / 续签 ACME 证书"
     echo -e "  ${green}6.${plain} 自定义证书路径 (或直接绑定 /root/cert/ 下已有证书)"
@@ -160,22 +165,26 @@ ssl_cert_menu() {
       1)
         ensure_acme
         local domain="" email="" port80=""
-        read -r -p "请输入已解析到本机的域名: " domain </dev/tty
+        read -r -p "请输入已解析到本机的域名 (如 cs.vponlive.com): " domain </dev/tty
+        domain="$(echo "$domain" | tr -d '\r\n ')"
         [[ -n "$domain" ]] || die "域名不能为空"
         read -r -p "请输入通知邮箱 (可留空): " email </dev/tty || true
         read -r -p "HTTP 验证监听端口 [默认 80]: " port80 </dev/tty || true
         port80="${port80:-80}"
         [[ -n "$email" ]] && ~/.acme.sh/acme.sh --register-account -m "$email" >/dev/null 2>&1 || true
         mkdir -p "/root/cert/${domain}" "/etc/nexusgate/certs/${domain}"
-        ~/.acme.sh/acme.sh --issue -d "$domain" --standalone --httpport "$port80" --force
+        ~/.acme.sh/acme.sh --issue -d "$domain" --standalone --httpport "$port80" --force || true
         ~/.acme.sh/acme.sh --installcert -d "$domain" \
           --key-file "/root/cert/${domain}/privkey.pem" \
-          --fullchain-file "/root/cert/${domain}/fullchain.pem" \
-          --reloadcmd "systemctl restart nexusgate nexusgate-singbox 2>/dev/null || true"
+          --fullchain-file "/root/cert/${domain}/fullchain.pem"
         cp -f "/root/cert/${domain}/fullchain.pem" "/etc/nexusgate/certs/${domain}/fullchain.pem"
         cp -f "/root/cert/${domain}/privkey.pem" "/etc/nexusgate/certs/${domain}/privkey.pem"
+        # Stop panel before updating nexusgate.json so running daemon doesn't overwrite it!
+        systemctl stop nexusgate.service 2>/dev/null || true
+        rm -rf /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
         NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-cert "/root/cert/${domain}/fullchain.pem" "/root/cert/${domain}/privkey.pem" "$domain"
-        systemctl restart nexusgate.service nexusgate-singbox.service 2>/dev/null || true
+        systemctl start nexusgate.service 2>/dev/null || true
+        systemctl restart nexusgate-singbox.service 2>/dev/null || true
         ok "域名 ${domain} 证书申请成功，已同时设为面板 HTTPS 与全部 TLS 节点默认证书！"
         show_info
         ;;
@@ -189,20 +198,23 @@ ssl_cert_menu() {
         ~/.acme.sh/acme.sh --issue -d "$pub_ip" --standalone --server letsencrypt --certificate-profile shortlived --days 6 --httpport 80 --force
         ~/.acme.sh/acme.sh --installcert -d "$pub_ip" \
           --key-file "/root/cert/ip/privkey.pem" \
-          --fullchain-file "/root/cert/ip/fullchain.pem" \
-          --reloadcmd "systemctl restart nexusgate nexusgate-singbox 2>/dev/null || true" || true
+          --fullchain-file "/root/cert/ip/fullchain.pem" || true
+        systemctl stop nexusgate.service 2>/dev/null || true
         NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-cert "/root/cert/ip/fullchain.pem" "/root/cert/ip/privkey.pem" "$pub_ip"
-        systemctl restart nexusgate.service nexusgate-singbox.service 2>/dev/null || true
+        systemctl start nexusgate.service 2>/dev/null || true
+        systemctl restart nexusgate-singbox.service 2>/dev/null || true
         ok "IP 短期受信任证书签发成功并已绑定至面板与节点！"
         show_info
         ;;
       3)
         local sni="" pub_ip=""
         pub_ip="$(curl -fsSL4 --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
-        read -r -p "请输入自签伪装域名 SNI [直接回车默认 www.bing.com]: " sni </dev/tty || true
-        sni="${sni:-www.bing.com}"
-        NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --issue-selfsigned "$sni" "$pub_ip"
-        systemctl restart nexusgate.service nexusgate-singbox.service 2>/dev/null || true
+        read -r -p "请输入自签伪装域名 SNI [直接回车默认 www.apple.com]: " sni </dev/tty || true
+        sni="${sni:-www.apple.com}"
+        systemctl stop nexusgate.service 2>/dev/null || true
+        NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --issue-selfsigned "$sni" "$pub_ip" --force
+        systemctl start nexusgate.service 2>/dev/null || true
+        systemctl restart nexusgate-singbox.service 2>/dev/null || true
         ok "10 年自签 SSL 证书已生成，并已同步绑定至面板 HTTPS 与 Sing-box 节点默认证书！"
         show_info
         ;;
@@ -220,12 +232,14 @@ ssl_cert_menu() {
         ;;
       6)
         local cf="" kf="" dm=""
-        read -r -p "请输入公钥证书路径 (如 /root/cert/xxx/fullchain.pem): " cf </dev/tty
-        read -r -p "请输入私钥文件路径 (如 /root/cert/xxx/privkey.pem): " kf </dev/tty
-        read -r -p "请输入对应域名标识 (可选): " dm </dev/tty || true
+        read -r -p "请输入公钥证书路径 (如 /root/cert/cs.vponlive.com/fullchain.pem): " cf </dev/tty
+        read -r -p "请输入私钥文件路径 (如 /root/cert/cs.vponlive.com/privkey.pem): " kf </dev/tty
+        read -r -p "请输入对应域名标识 (如 cs.vponlive.com): " dm </dev/tty || true
         [[ -f "$cf" && -f "$kf" ]] || die "证书或私钥文件不存在"
+        systemctl stop nexusgate.service 2>/dev/null || true
         NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-cert "$cf" "$kf" "$dm"
-        systemctl restart nexusgate.service nexusgate-singbox.service 2>/dev/null || true
+        systemctl start nexusgate.service 2>/dev/null || true
+        systemctl restart nexusgate-singbox.service 2>/dev/null || true
         ok "自定义证书已成功绑定至面板 HTTPS 与节点默认证书！"
         show_info
         ;;
@@ -234,8 +248,9 @@ ssl_cert_menu() {
         find /root/cert /etc/nexusgate/certs -maxdepth 2 -name "*.pem" 2>/dev/null || echo "暂无证书文件"
         ;;
       8)
+        systemctl stop nexusgate.service 2>/dev/null || true
         NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-cert "" ""
-        systemctl restart nexusgate.service 2>/dev/null || true
+        systemctl start nexusgate.service 2>/dev/null || true
         ok "已关闭面板 HTTPS，现在可通过 HTTP 访问面板！"
         show_info
         ;;
@@ -250,7 +265,8 @@ cf_ssl_cert() {
   ensure_acme
   echo -e "${cyan}---------------- Cloudflare DNS API 申请 SSL 证书 ----------------${plain}"
   local domain="" mode=""
-  read -r -p "请输入要申请的域名 (如 node.example.com 或 *.example.com): " domain </dev/tty
+  read -r -p "请输入要申请的域名 (如 cs.vponlive.com): " domain </dev/tty
+  domain="$(echo "$domain" | tr -d '\r\n ')"
   [[ -n "$domain" ]] || die "域名不能为空"
   echo -e "  ${green}1.${plain} 使用 Cloudflare API Token (推荐，Zone:DNS:Edit 权限)"
   echo -e "  ${green}2.${plain} 使用 Cloudflare Global API Key + 注册邮箱"
@@ -267,15 +283,17 @@ cf_ssl_cert() {
     export CF_Token="$cf_token"
   fi
   mkdir -p "/root/cert/${domain}" "/etc/nexusgate/certs/${domain}"
-  ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$domain" --force
+  ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$domain" --force || true
   ~/.acme.sh/acme.sh --installcert -d "$domain" \
     --key-file "/root/cert/${domain}/privkey.pem" \
-    --fullchain-file "/root/cert/${domain}/fullchain.pem" \
-    --reloadcmd "systemctl restart nexusgate nexusgate-singbox 2>/dev/null || true"
+    --fullchain-file "/root/cert/${domain}/fullchain.pem"
   cp -f "/root/cert/${domain}/fullchain.pem" "/etc/nexusgate/certs/${domain}/fullchain.pem"
   cp -f "/root/cert/${domain}/privkey.pem" "/etc/nexusgate/certs/${domain}/privkey.pem"
+  systemctl stop nexusgate.service 2>/dev/null || true
+  rm -rf /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-cert "/root/cert/${domain}/fullchain.pem" "/root/cert/${domain}/privkey.pem" "$domain"
-  systemctl restart nexusgate.service nexusgate-singbox.service 2>/dev/null || true
+  systemctl start nexusgate.service 2>/dev/null || true
+  systemctl restart nexusgate-singbox.service 2>/dev/null || true
   ok "Cloudflare SSL 证书申请成功，已自动绑定至面板与全部 TLS 节点！"
   show_info
 }
@@ -446,7 +464,9 @@ migrate_3xui() {
   local db_path=""
   read -r -p "请输入 3x-ui 数据库或备份包路径 [默认 ${default_db}]: " db_path </dev/tty || true
   db_path="${db_path:-$default_db}"
+  systemctl stop nexusgate.service 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --migrate-3xui "$db_path" merge
+  systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
 }
 
@@ -456,13 +476,17 @@ update_panel() {
   local tmp
   tmp="$(mktemp -d /tmp/ng-update.XXXXXX)"
   curl -fL --retry 3 "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz" -o "$tmp/src.tar.gz"
+  systemctl stop nexusgate.service 2>/dev/null || true
   mkdir -p "$INSTALL_DIR"
   tar -xzf "$tmp/src.tar.gz" -C "$INSTALL_DIR" --strip-components=1
   install -m 0755 "$INSTALL_DIR/nexusgate.sh" /usr/local/bin/nexusgate
   ln -sf /usr/local/bin/nexusgate /usr/local/bin/ng
-  rm -rf -- "$tmp"
-  systemctl restart nexusgate.service 2>/dev/null || true
-  ok "NexusGate 面板与管理脚本已更新至最新版本！"
+  rm -rf -- "$tmp" /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
+  # Trigger cert discovery & UUID auto-repair before restarting
+  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --show-info >/dev/null || true
+  systemctl start nexusgate.service 2>/dev/null || true
+  systemctl restart nexusgate-singbox.service 2>/dev/null || true
+  ok "NexusGate 面板与管理脚本已更新至 v2.2，并已自动绑定已申请的域名证书！"
   show_info
 }
 
@@ -482,7 +506,7 @@ uninstall_panel() {
 menu() {
   while true; do
     clear || true
-    echo -e "${green}NexusGate · 枢门 Sing-box 轻量中转管理脚本 v2.1${plain}"
+    echo -e "${green}NexusGate · 枢门 Sing-box 轻量中转管理脚本 v2.2${plain}"
     echo -e "${green}一个融合 NexusGate UI 与 3x-ui 核心能力的轻量面板${plain}"
     echo -e "————————————————————————————————————————————————"
     echo -e "  ${green}0.${plain} 退出脚本"
@@ -492,8 +516,8 @@ menu() {
     echo -e "  ${green}4.${plain} 自定义 / 切换 Sing-box 内核版本"
     echo -e "  ${green}5.${plain} 卸载面板"
     echo -e "————————————————————————————————————————————————"
-    echo -e "  ${green}6.${plain} 重置用户名、密码"
-    echo -e "  ${green}7.${plain} 修改访问路径 (webBasePath)"
+    echo -e "  ${green}6.${plain} 重置用户名、密码 (默认生成18位高强度密码)"
+    echo -e "  ${green}7.${plain} 修改访问路径 (默认生成16位随机安全路径)"
     echo -e "  ${green}8.${plain} 重置面板设置 (恢复默认端口与路径)"
     echo -e "  ${green}9.${plain} 修改面板端口"
     echo -e "  ${green}10.${plain} 查看当前面板设置 (完整登录链接/账号/端口)"
@@ -507,7 +531,7 @@ menu() {
     echo -e "  ${green}16.${plain} 启用开机自启"
     echo -e "  ${green}17.${plain} 禁用开机自启"
     echo -e "————————————————————————————————————————————————"
-    echo -e "  ${green}18.${plain} SSL 证书管理 (含无域名10年自签 / ACME / IP证书)"
+    echo -e "  ${green}18.${plain} SSL 证书管理 (自动绑定面板与节点 / ACME / IP证书 / 自签)"
     echo -e "  ${green}19.${plain} Cloudflare SSL 证书 (CF DNS API 申请)"
     echo -e "  ${green}20.${plain} IP 设备限制与防爆破管理"
     echo -e "  ${green}21.${plain} 防火墙端口管理"

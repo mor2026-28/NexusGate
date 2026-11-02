@@ -21,10 +21,9 @@ warn() { echo -e "${yellow}[提示]${plain} $*"; }
 
 [[ "${EUID}" -eq 0 ]] || die "请使用 root 权限运行此安装脚本 (sudo -i)"
 
-# Safe random string generator without SIGPIPE under pipefail
 gen_random_str() {
-  local len="${1:-10}"
-  openssl rand -base64 48 2>/dev/null | tr -dc 'a-zA-Z0-9' | cut -c1-"$len" | tr -d '\r\n '
+  local len="${1:-16}"
+  openssl rand -base64 64 2>/dev/null | tr -dc 'a-zA-Z0-9' | cut -c1-"$len" | tr -d '\r\n '
 }
 
 gen_random_port() {
@@ -136,34 +135,34 @@ configure_panel() {
   mkdir -p "$DATA_DIR" "$CONF_DIR/sing-box" "$CONF_DIR/certs" /root/cert
   chmod 0700 "$DATA_DIR" "$CONF_DIR"
 
+  # Stop running service before modifyingnexusgate.json to avoid memory overwrite
+  systemctl stop nexusgate.service 2>/dev/null || true
+
   local default_port default_user default_pass default_path
   default_port="$(gen_random_port)"
-  default_user="admin"
-  default_pass="$(gen_random_str 12)"
-  default_path="/$(gen_random_str 8)/"
+  default_user="ng_$(gen_random_str 10)"
+  default_pass="$(gen_random_str 18)"
+  default_path="/$(gen_random_str 16)/"
 
   local panel_port="$default_port"
   local admin_user="$default_user"
   local admin_pass="$default_pass"
   local base_path="$default_path"
-  local use_selfsigned="y"
 
   if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
     echo ""
-    echo -e "${cyan}=== NexusGate Sing-box 面板初始化安全配置 (直接回车使用默认值，类似 3x-ui) ===${plain}"
+    echo -e "${cyan}=== NexusGate Sing-box 面板初始化安全配置 (直接回车使用高强度随机值，同 3x-ui) ===${plain}"
     read -r -p "请输入面板端口 [默认随机: ${default_port}]: " input_port </dev/tty || true
     [[ -n "${input_port:-}" ]] && panel_port="${input_port//[^0-9]/}"
 
-    read -r -p "请输入管理员账号 [默认: ${default_user}]: " input_user </dev/tty || true
+    read -r -p "请输入管理员账号 [默认随机: ${default_user}]: " input_user </dev/tty || true
     [[ -n "${input_user:-}" ]] && admin_user="$(echo "$input_user" | tr -d '\r\n ')"
 
-    read -r -p "请输入管理员密码 [默认随机: ${default_pass}]: " input_pass </dev/tty || true
+    read -r -p "请输入管理员密码 [默认随机 18 位: ${default_pass}]: " input_pass </dev/tty || true
     [[ -n "${input_pass:-}" ]] && admin_pass="$(echo "$input_pass" | tr -d '\r\n ')"
 
-    read -r -p "请输入面板安全根路径 [默认随机: ${default_path}，输入 / 则不设后缀]: " input_path </dev/tty || true
+    read -r -p "请输入面板 16 位安全路径 [默认随机: ${default_path}]: " input_path </dev/tty || true
     [[ -n "${input_path:-}" ]] && base_path="$(echo "$input_path" | tr -d '\r\n ')"
-
-    read -r -p "是否自动生成 10 年自签 SSL 证书开启面板 HTTPS 并供节点使用 (无域名推荐)？[Y/n]: " use_selfsigned </dev/tty || true
   fi
 
   local pub_ip=""
@@ -177,6 +176,9 @@ NG_SINGBOX_BIN=/usr/local/bin/sing-box
 NG_SINGBOX_CONFIG=${CONF_DIR}/sing-box/config.json
 EOF
   chmod 0600 "${CONF_DIR}/nexusgate.env"
+
+  # Remove any old www.bing.com self-signed folder
+  rm -rf /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
 
   NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --set-account "$admin_user" "$admin_pass" >/dev/null
   NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --set-port "$panel_port" >/dev/null
@@ -192,13 +194,8 @@ json.dump(d, open(p, "w"))
 PY
   fi
 
-  local proto="http"
-  if [[ "${use_selfsigned:-y}" =~ ^[Yy]?$ ]]; then
-    NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --issue-selfsigned "www.bing.com" "$pub_ip" >/dev/null
-    proto="https"
-  else
-    NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --set-cert "" "" >/dev/null
-  fi
+  # Auto-detect existing ACME domain cert first; if none exists, generate 10-year self-signed cert
+  NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --issue-selfsigned "www.apple.com" "$pub_ip" >/dev/null
 
   # Auto-detect existing 3x-ui database or backup archive
   if [[ -f /etc/x-ui/x-ui.db || -f /root/3xui_backup.tar.gz ]]; then
@@ -241,27 +238,24 @@ PY
     nohup env NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" >/var/log/nexusgate.log 2>&1 &
   fi
 
-  local clean_base
-  clean_base="$(NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --show-info | python3 -c 'import sys,json; print(json.load(sys.stdin).get("basePath","/"))' 2>/dev/null || echo "/")"
-  [[ "$clean_base" != "/" ]] && clean_base="${clean_base%/}/"
+  local info_json login_url cert_domain
+  info_json="$(NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --show-info)"
+  login_url="$(echo "$info_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("url",""))' 2>/dev/null || echo "")"
+  cert_domain="$(echo "$info_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("defaultNodeTlsDomain",""))' 2>/dev/null || echo "")"
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.1 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.2 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
-  echo -e " 完整登录地址 : ${cyan}${proto}://${pub_ip:-您的服务器IP}:${panel_port}${clean_base}${plain}"
-  echo -e " 快捷跳转地址 : ${cyan}${proto}://${pub_ip:-您的服务器IP}:${panel_port}/${plain} (默认自动跳转至安全路径)"
+  echo -e " 面板访问地址 : ${cyan}${login_url}${plain}"
   echo -e " 面板端口     : ${yellow}${panel_port}${plain}"
-  echo -e " 安全根路径   : ${yellow}${clean_base}${plain}"
+  echo -e " 安全根路径   : ${yellow}${base_path}${plain} (已启用安全模式：单 IP+端口 禁止直接访问)"
   echo -e " 管理员账号   : ${green}${admin_user}${plain}"
   echo -e " 管理员密码   : ${green}${admin_pass}${plain}"
-  echo -e " SSL 证书状态 : ${green}$([[ "$proto" == "https" ]] && echo "已绑定 10 年自签证书 (面板与节点通用)" || echo "HTTP 模式")${plain}"
+  echo -e " 默认证书域名 : ${green}${cert_domain}${plain}"
   echo -e " 内核加速状态 : ${green}已开启 BBR + FQ + HY2 64MB UDP 缓冲优化${plain}"
   echo -e " SSH 管理命令 : 输入 ${cyan}ng${plain} 或 ${cyan}nexusgate${plain} 呼出 0-25 完整管理菜单 (同 3x-ui)"
   echo -e "${green}==================================================================${plain}"
-  if [[ "$proto" == "https" ]]; then
-    echo -e " ${yellow}提示: 首次使用 IP+自签证书访问 https 时，浏览器提示“不是私密连接”属正常现象，点击【高级 -> 继续前往】即可进入登录页。${plain}"
-  fi
 }
 
 install_dependencies

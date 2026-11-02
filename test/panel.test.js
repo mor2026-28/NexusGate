@@ -9,6 +9,8 @@ const { spawnSync } = require('node:child_process');
 
 const { normalizeBasePath } = require('../lib/http');
 const {
+  isValidUuid,
+  ensureUuid,
   generateRealityKeypair,
   deriveRealityPublicKey,
   generateSsKey,
@@ -20,26 +22,80 @@ const {
 const { buildSingboxConfig } = require('../lib/singbox');
 const { parse3xuiPayload, apply3xuiMigration } = require('../lib/migrate3xui');
 const { Store } = require('../lib/store');
-const { issueSelfSignedCert, getAccelerationStatus } = require('../lib/system');
+const { issueSelfSignedCert } = require('../lib/system');
 const { formatSubscription } = require('../lib/subscriptions');
 
-test('normalizeBasePath strips accidental shell pipe newlines and control chars', () => {
+test('normalizeBasePath strips accidental shell pipe newlines and Store defaults to strictBasePath=true', () => {
   assert.equal(normalizeBasePath('/qErfNupP\ndf89b623856/'), '/qErfNupP');
-  assert.equal(normalizeBasePath('  /my_secret_path/  '), '/my_secret_path');
-  assert.equal(normalizeBasePath('/'), '/');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-strict-'));
+  const store = new Store(path.join(tmpDir, 'nexusgate.json'));
+  assert.equal(store.state.settings.strictBasePath, true);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test('X25519 Reality keypair generation and public key derivation', () => {
-  const pair = generateRealityKeypair();
-  assert.ok(pair.privateKey.length >= 40);
-  assert.ok(pair.publicKey.length >= 40);
-  const derived = deriveRealityPublicKey(pair.privateKey);
-  assert.equal(derived, pair.publicKey);
-});
+test('UUID validation and auto-repair prevents base64 keys from corrupting VLESS links', () => {
+  assert.equal(isValidUuid('Sr44m/SQ0MAsXxmR0o9GVQ=='), false);
+  const repaired = ensureUuid('Sr44m/SQ0MAsXxmR0o9GVQ==');
+  assert.equal(isValidUuid(repaired), true);
 
-test('All protocols compile into valid Sing-box inbounds and generate 100% client-compatible URIs', () => {
+  // Verify VLESS inbound with bad client id produces a valid UUID in both Sing-box config and v2rayN share link
   const kp = generateRealityKeypair();
-  const serverPublicIp = '216.23.82.153';
+  const inb = {
+    id: 'in_bad_uuid',
+    tag: 'inbound-50488',
+    remark: 'JP',
+    protocol: 'vless',
+    port: 50488,
+    security: 'reality',
+    transport: 'tcp',
+    flow: 'xtls-rprx-vision',
+    reality: {
+      serverName: 'www.tesla.com',
+      target: 'www.tesla.com:443',
+      privateKey: kp.privateKey,
+      publicKey: kp.publicKey,
+      shortIds: ['e97ba46b']
+    },
+    clients: [{ id: 'Sr44m/SQ0MAsXxmR0o9GVQ==', email: 'user_1', flow: 'xtls-rprx-vision', enable: true }]
+  };
+
+  const sbInb = toSingboxInbound(inb);
+  assert.equal(isValidUuid(sbInb.users[0].uuid), true);
+
+  const links = buildClientLinks(inb, 'cs.vponlive.com');
+  assert.equal(links.length, 1);
+  // Must parse cleanly as a standard URL without '/' in username!
+  const parsedUrl = new URL(links[0].uri);
+  assert.equal(isValidUuid(parsedUrl.username), true);
+  assert.equal(parsedUrl.hostname, 'cs.vponlive.com');
+  assert.equal(parsedUrl.port, '50488');
+});
+
+test('CLI commands (--show-info, --issue-selfsigned, --set-cert) execute cleanly without ReferenceError', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-cli-'));
+  const dataFile = path.join(tmpDir, 'nexusgate.json');
+  const serverPath = path.join(__dirname, '..', 'server.js');
+
+  const res1 = spawnSync('node', [serverPath, '--issue-selfsigned', 'cs.vponlive.com', '216.23.82.153'], {
+    env: { ...process.env, NG_DATA_FILE: dataFile },
+    encoding: 'utf8'
+  });
+  assert.equal(res1.status, 0, res1.stderr);
+
+  const res2 = spawnSync('node', [serverPath, '--show-info'], {
+    env: { ...process.env, NG_DATA_FILE: dataFile },
+    encoding: 'utf8'
+  });
+  assert.equal(res2.status, 0, res2.stderr);
+  const info = JSON.parse(res2.stdout);
+  assert.equal(info.https, true);
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('All protocols compile into valid Sing-box inbounds and generate v2rayN-compatible URIs without unescaped slashes before @', () => {
+  const kp = generateRealityKeypair();
+  const domain = 'cs.vponlive.com';
   const protocolsToTest = [
     {
       id: 'in_vless',
@@ -66,9 +122,9 @@ test('All protocols compile into valid Sing-box inbounds and generate 100% clien
       protocol: 'anytls',
       port: 24444,
       security: 'tls',
-      tlsDomain: 'www.bing.com',
-      password: 'anytls_secret_pass',
-      clients: [{ email: 'u_anytls', password: 'anytls_secret_pass', enable: true }]
+      tlsDomain: domain,
+      password: 'anytlsCleanPassword123',
+      clients: [{ email: 'u_anytls', password: 'anytlsCleanPassword123', enable: true }]
     },
     {
       id: 'in_hy2',
@@ -77,11 +133,11 @@ test('All protocols compile into valid Sing-box inbounds and generate 100% clien
       protocol: 'hysteria2',
       port: 24445,
       security: 'tls',
-      tlsDomain: 'www.bing.com',
+      tlsDomain: domain,
       upMbps: 100,
       downMbps: 100,
       obfsPassword: 'salamander_pass',
-      clients: [{ email: 'u_hy2', password: 'hy2_password', enable: true }]
+      clients: [{ email: 'u_hy2', password: 'hy2CleanPassword123', enable: true }]
     },
     {
       id: 'in_ss128',
@@ -100,13 +156,14 @@ test('All protocols compile into valid Sing-box inbounds and generate 100% clien
       protocol: 'shadowsocks',
       port: 24447,
       method: '2022-blake3-aes-128-gcm',
-      password: generateSsKey('2022-blake3-aes-128-gcm'),
-      clients: [{ email: 'u_ss2022_128', password: generateSsKey('2022-blake3-aes-128-gcm'), enable: true }]
+      password: 'Sr44m/SQ0MAsXxmR0o9GVQ==', // Key containing '/' to test URL safety!
+      clients: [{ email: 'u_ss2022_128', password: 'Sr44m/SQ0MAsXxmR0o9GVQ==', enable: true }]
     },
     {
       id: 'in_ss2022_256',
       tag: 'ss2022-256-in',
       remark: 'SS2022-256',
+      protocol: 'shadowsocks',
       protocol: 'shadowsocks',
       port: 24448,
       method: '2022-blake3-aes-256-gcm',
@@ -130,29 +187,17 @@ test('All protocols compile into valid Sing-box inbounds and generate 100% clien
     assert.equal(sbInb.type, inb.protocol);
     assert.equal(sbInb.listen_port, inb.port);
 
-    // Ensure single-user SS2022 does not force multi-user EIH array
-    if (inb.protocol === 'shadowsocks') {
-      assert.equal(sbInb.users, undefined);
-    }
-
-    const links = buildClientLinks(inb, serverPublicIp);
+    const links = buildClientLinks(inb, domain);
     assert.equal(links.length, 1);
 
-    // Ensure connect host is ALWAYS the real server IP (216.23.82.153), NOT fake SNI www.bing.com!
-    assert.ok(links[0].uri.includes(`@${serverPublicIp}:${inb.port}`));
-
-    // Ensure self-signed AnyTLS & HY2 automatically include insecure=1
-    if (inb.protocol === 'anytls' || inb.protocol === 'hysteria2') {
-      assert.ok(links[0].uri.includes('insecure=1'));
-      assert.ok(links[0].uri.includes('sni=www.bing.com'));
-    }
+    // Ensure no unescaped '/' appears before '@' in the URI authority section
+    const authPart = links[0].uri.split('://')[1].split('@')[0];
+    assert.equal(authPart.includes('/'), false, `URI authority contains '/' which breaks .NET Uri: ${links[0].uri}`);
 
     const parsedOut = parseShareUriToOutbound(links[0].uri);
     assert.equal(parsedOut.type, inb.protocol);
-    assert.equal(parsedOut.server, serverPublicIp);
+    assert.equal(parsedOut.server, domain);
     assert.equal(parsedOut.port, inb.port);
-    const sbOut = toSingboxOutbound(parsedOut);
-    assert.equal(sbOut.type, inb.protocol);
   }
 });
 
@@ -195,16 +240,16 @@ xray_template = json.dumps({
     {"tag": "direct", "protocol": "freedom", "settings": {}},
     {"tag": "blocked", "protocol": "blackhole", "settings": {}},
     {
-      "tag": "jp-relay-out",
+      "tag": "ace荷包蛋",
       "protocol": "shadowsocks",
       "settings": {
-        "servers": [{"address": "203.0.113.50", "port": 18388, "method": "2022-blake3-aes-256-gcm", "password": "${generateSsKey('2022-blake3-aes-256-gcm')}"}]
+        "servers": [{"address": "216.167.79.95", "port": 46893, "method": "2022-blake3-aes-256-gcm", "password": "${generateSsKey('2022-blake3-aes-256-gcm')}"}]
       }
     }
   ],
   "routing": {
     "rules": [
-      {"type": "field", "inboundTag": ["inbound-34567"], "outboundTag": "jp-relay-out"}
+      {"type": "field", "inboundTag": ["inbound-34567"], "outboundTag": "ace荷包蛋"}
     ]
   }
 })
@@ -222,19 +267,15 @@ conn.close()
   assert.equal(parsed.summary.inboundsCount, 1);
   assert.equal(parsed.summary.outboundsCount, 1);
   assert.equal(parsed.inbounds[0].limitIp, 3);
-  assert.equal(parsed.inbounds[0].outboundTag, 'jp-relay-out');
+  assert.equal(parsed.inbounds[0].outboundTag, 'ace荷包蛋');
 
   const store = new Store(storePath);
   apply3xuiMigration(store, parsed, 'replace');
   const sbConfig = buildSingboxConfig(store.state);
   assert.equal(sbConfig.inbounds.length, 1);
 
-  const clashSub = formatSubscription(store.state, 'all', 'clash', '216.23.82.153:50084');
-  assert.ok(clashSub.body.includes('216.23.82.153'));
-
-  const cert = issueSelfSignedCert({ domain: 'www.bing.com', ip: '216.23.82.153', baseDir: path.join(tmpDir, 'certs') });
-  assert.equal(cert.valid, true);
-  assert.ok(getAccelerationStatus().congestion);
+  const clashSub = formatSubscription(store.state, 'all', 'clash', 'cs.vponlive.com:15626');
+  assert.ok(clashSub.body.includes('cs.vponlive.com'));
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });

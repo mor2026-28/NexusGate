@@ -204,3 +204,11 @@ dialog::backdrop{background:rgba(15,22,36,.52);backdrop-filter:blur(3px)}
   .metrics,.form-grid{grid-template-columns:1fr}
   .form-grid .wide,.form-actions,.section-title{grid-column:1}
 }
+
+/* 3x-ui Multi-Column Routing Table Borders */
+.xui-routing-table th, .xui-routing-table td {
+  border-right: 1px solid var(--line);
+}
+.xui-routing-table th:last-child, .xui-routing-table td:last-child {
+  border-right: 0;
+}

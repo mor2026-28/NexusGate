@@ -16,7 +16,7 @@ const state = {
   routing: { final: 'direct', rules: [], ruleSets: [] },
   dns: { strategy: 'prefer_ipv4' },
   certificates: [],
-  defaultSettings: { defaultTlsDomain: 'www.bing.com', defaultCertFile: '', defaultKeyFile: '' },
+  defaultSettings: { defaultTlsDomain: 'www.apple.com', defaultCertFile: '', defaultKeyFile: '' },
   settings: {},
   admin: {},
   migrations: [],
@@ -28,13 +28,45 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[c]);
 const selected = (v, cur) => String(v) === String(cur) ? ' selected' : '';
 
+function genUuidClient() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function genRandomAlnum(len = 16) {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let out = '';
+  for (let i = 0; i < len; i += 1) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
+}
+
+function makeQrSvg(text) {
+  if (typeof window.qrcode !== 'function' || !text) return '';
+  try {
+    const qr = window.qrcode(0, 'M');
+    qr.addData(String(text), 'Byte');
+    qr.make();
+    return qr.createSvgTag(4, 4);
+  } catch {
+    return '';
+  }
+}
+
 function fmtBytes(bytes) {
   let n = Number(bytes || 0);
   if (!Number.isFinite(n) || n <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
   let i = 0;
   while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
-  return `${n >= 10 || i === 0 ? n.toFixed(0) : n.toFixed(1)} ${units[i]}`;
+  return `${n >= 10 || i === 0 ? n.toFixed(0) : n.toFixed(2)} ${units[i]}`;
 }
 
 function fmtUptime(sec) {
@@ -167,11 +199,13 @@ async function load(page = state.page) {
       state.inbounds = data.inbounds || [];
       state.outbounds = data.outbounds || [];
       state.certificates = data.certificates || [];
+      if (data.settings) state.settings = data.settings;
       if (data.defaultSettings) state.defaultSettings = data.defaultSettings;
     } else if (page === 'outbounds') {
       const data = await api('/api/outbounds');
       state.outbounds = data.outbounds || [];
       state.inbounds = data.inbounds || [];
+      if (data.routing) state.routing = data.routing;
     } else if (page === 'routing') {
       const data = await api('/api/routing');
       state.routing = data.routing || { final: 'direct', rules: [] };
@@ -206,8 +240,8 @@ function setPage(page) {
   const titles = {
     overview: '系统与内核总览',
     inbounds: '入站节点管理',
-    outbounds: '出站与中转节点',
-    routing: '路由与分流规则',
+    outbounds: '出站规则管理 (3x-ui 模式)',
+    routing: '路由与转发规则 (3x-ui 模式)',
     migrate: '3x-ui 无损迁移',
     certificates: 'SSL 证书与订阅',
     settings: '面板设置与安全'
@@ -215,6 +249,15 @@ function setPage(page) {
   $('#page-title').textContent = titles[page] || '控制台';
   $('#breadcrumb').textContent = `NEXUSGATE / ${titles[page] || ''}`;
   load(page);
+}
+
+function getBaseSubscriptionUrl(subToken = 'all') {
+  const s = state.settings || {};
+  const proto = window.location.protocol;
+  const host = s.webDomain || window.location.hostname || s.publicIPv4 || '127.0.0.1';
+  const portPart = window.location.port ? `:${window.location.port}` : (s.webPort ? `:${s.webPort}` : '');
+  const subPath = (s.subPath || '/sub/').replace(/\/+$/, '');
+  return `${proto}//${host}${portPart}${subPath}/${encodeURIComponent(subToken)}`;
 }
 
 /* ==================== RENDER PAGES ==================== */
@@ -239,9 +282,9 @@ function renderOverview() {
   const metrics = [
     ['入站节点', counts.inbounds || 0, `${counts.activeInbounds || 0} 个运行中`, '#3478ee'],
     ['活跃客户端', counts.clients || 0, '支持在线 IP/设备数限制', '#159f70'],
-    ['中转与出站', counts.outbounds || 0, `${counts.relayBindings || 0} 条入站直绑中转`, '#8a4ef7'],
-    ['分流规则', counts.rules || 0, '3x-ui 风格域名/IP/协议分流', '#e8a63c'],
-    ['SSL 证书', counts.certificates || 0, '面板与节点一站式通用', '#d84d61']
+    ['中转出站节点', counts.outbounds || 0, `${counts.relayBindings || 0} 条入站直绑中转`, '#8a4ef7'],
+    ['路由转发规则', counts.rules || 0, '3x-ui 模式清晰映射', '#e8a63c'],
+    ['SSL 证书', counts.certificates || 0, '自动优先绑定已申请域名证书', '#d84d61']
   ];
 
   const barClass = (pct) => (pct >= 88 ? 'crit' : pct >= 70 ? 'warn' : '');
@@ -259,7 +302,7 @@ function renderOverview() {
   return `
     ${ov.local3xuiExists ? `
       <div class="notice" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-        <div><b>检测到本机存在 3x-ui 数据 (/etc/x-ui/x-ui.db 或 /root/3xui_backup.tar.gz)</b> · 可一键无损迁移全部入站节点、客户端凭据、中转出站与分流规则到 Sing-box。</div>
+        <div><b>检测到本机存在 3x-ui 数据 (/etc/x-ui/x-ui.db 或 /root/3xui_backup.tar.gz)</b> · 可一键无损迁移全部入站节点、客户端凭据、中转出站与路由转发规则。</div>
         <button class="primary" data-action="jump-migrate">前往一键无损迁移 →</button>
       </div>
     ` : ''}
@@ -390,8 +433,9 @@ function renderInbounds() {
   const filtered = state.inbounds.filter((item) =>
     [item.remark, item.tag, item.protocol, item.port, item.outboundTag].join(' ').toLowerCase().includes(q)
   );
+  const subAllUrl = getBaseSubscriptionUrl('all');
 
-  const rows = filtered.map((item) => {
+  const rows = filtered.map((item, idx) => {
     const protoBadge = item.protocol.toUpperCase();
     const secBadge = item.security && item.security !== 'none' ? `<span class="tag tls">${esc(item.security.toUpperCase())}</span>` : '';
     const netBadge = item.transport && item.transport !== 'tcp' ? `<span class="tag">${esc(item.transport.toUpperCase())}</span>` : '';
@@ -403,24 +447,25 @@ function renderInbounds() {
     let relayHtml = '<span class="tag">默认路由</span>';
     if (item.outboundTag && item.outboundTag !== 'default') {
       if (item.outboundTag === 'direct') {
-        relayHtml = '<span class="tag tls">本地直连 (direct)</span>';
+        relayHtml = '<span class="tag tls">direct (直连)</span>';
       } else if (item.outboundTag === 'block') {
-        relayHtml = '<span class="status disabled">黑洞拦截</span>';
+        relayHtml = '<span class="status disabled">block (拦截)</span>';
       } else {
         const targetOut = state.outbounds.find((o) => o.tag === item.outboundTag);
-        relayHtml = `<span class="tag relay">⇄ 中转: ${esc(targetOut ? targetOut.remark : item.outboundTag)}</span>`;
+        relayHtml = `<span class="tag relay">⇄ ${esc(targetOut ? `${targetOut.tag} (${targetOut.server}:${targetOut.port})` : item.outboundTag)}</span>`;
       }
     }
 
     const limitIp = Number(item.limitIp || 0);
     const activeIpCount = Number(item.activeIpCount || 0);
-    const totalQuota = item.total > 0 ? ` / 限额 ${fmtBytes(item.total)}` : '';
+    const totalQuota = item.total > 0 ? ` / ${fmtBytes(item.total)}` : '';
 
     return `
       <tr>
+        <td><strong>${idx + 1}</strong></td>
         <td>
           <strong>${esc(item.remark)}</strong>
-          <small>Tag: ${esc(item.tag)} · 监听: ${esc(item.listen || '::')}</small>
+          <small>标签 Tag: <code>${esc(item.tag)}</code> · 监听: ${esc(item.listen || '::')}</small>
           ${directNote}
         </td>
         <td>
@@ -430,8 +475,8 @@ function renderInbounds() {
         <td><strong>:${esc(item.port)}</strong></td>
         <td>${relayHtml}</td>
         <td>
-          <strong>↑ ${fmtBytes(item.up)} · ↓ ${fmtBytes(item.down)}${esc(totalQuota)}</strong>
-          <small>在线设备 IP: <b>${activeIpCount}</b> / ${limitIp > 0 ? `限制 ${limitIp} 台` : '不限'}${(item.activeIps && item.activeIps.length) ? ` (${esc(item.activeIps.join(', '))})` : ''}</small>
+          <span class="status valid">↑ ${fmtBytes(item.up)} / ↓ ${fmtBytes(item.down)}${esc(totalQuota)}</span>
+          <small>在线设备 IP: <b>${activeIpCount}</b> / ${limitIp > 0 ? `限制 ${limitIp} 台` : '不限'}</small>
         </td>
         <td>
           <span class="status ${item.enable !== false ? 'active' : 'disabled'}">
@@ -440,9 +485,9 @@ function renderInbounds() {
         </td>
         <td>
           <div class="actions">
-            ${item.protocol !== 'direct' ? `<button class="primary" data-action="inbound-links" data-id="${esc(item.id)}">链接 / 二维码</button>` : ''}
+            ${item.protocol !== 'direct' ? `<button class="primary" data-action="inbound-links" data-id="${esc(item.id)}">二维码 / 链接 / 订阅</button>` : ''}
             <button data-action="edit-inbound" data-id="${esc(item.id)}">编辑</button>
-            <button data-action="reset-inbound-traffic" data-id="${esc(item.id)}" title="清零流量统计">清零</button>
+            <button data-action="reset-inbound-traffic" data-id="${esc(item.id)}" title="重置流量">重置流量</button>
             <button data-action="toggle-inbound" data-id="${esc(item.id)}">${item.enable !== false ? '停用' : '启用'}</button>
             <button class="danger" data-action="delete-inbound" data-id="${esc(item.id)}">删除</button>
           </div>
@@ -453,9 +498,11 @@ function renderInbounds() {
 
   return `
     <div class="page-intro">
-      <p>支持搭建 VLESS (Reality/TLS/WS/gRPC)、AnyTLS、Hysteria 2 (HY2)、SS AES-128/256-GCM、SS 2022 (128/256)、SOCKS5、Trojan、VMess、TUIC 及 Direct 端口转发。支持限制每个节点的在线 IP 设备数与流量配额，并一键生成全客户端兼容链接与二维码。</p>
-      <div style="display:flex;gap:8px">
-        <button data-action="copy-all-links">📋 一键复制全部节点链接</button>
+      <p>支持搭建 VLESS (Reality/TLS/WS/gRPC)、AnyTLS、Hysteria 2 (HY2)、SS AES-128/256-GCM、SS 2022 (128/256)、SOCKS5、Trojan、VMess、TUIC 及 Direct 端口转发。当前节点默认证书域名: <b>${esc(state.defaultSettings?.defaultTlsDomain || state.settings?.webDomain || 'www.apple.com')}</b></p>
+      <div style="display:flex;flex-wrap:wrap;gap:8px">
+        <button data-copy="${esc(subAllUrl)}">🔗 复制聚合订阅地址</button>
+        <button data-qr="${esc(subAllUrl)}">📱 聚合订阅二维码</button>
+        <button data-action="copy-all-links">📋 复制全部节点链接</button>
         <button class="primary" data-action="add-inbound">＋ 新建入站节点</button>
       </div>
     </div>
@@ -483,17 +530,18 @@ function renderInbounds() {
         <table>
           <thead>
             <tr>
-              <th>备注 / Tag</th>
+              <th>#</th>
+              <th>备注 / 标签 (Tag)</th>
               <th>协议与传输</th>
               <th>端口</th>
-              <th>出站 / 中转绑定</th>
-              <th>流量统计与在线 IP 限制</th>
+              <th>转发目标出站</th>
+              <th>流量统计 / IP 限制</th>
               <th>状态</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            ${rows || '<tr><td colspan="7"><div class="empty"><b>还没有入站节点</b><span>点击上方“⚡ 快捷模板”或“＋ 新建入站节点”可在数秒内完成部署</span></div></td></tr>'}
+            ${rows || '<tr><td colspan="8"><div class="empty"><b>还没有入站节点</b><span>点击上方“⚡ 快捷模板”或“＋ 新建入站节点”可在数秒内完成部署</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -501,56 +549,61 @@ function renderInbounds() {
   `;
 }
 
+/**
+ * 3x-ui Style Outbounds Table (对照用户截图 image_2eeb5f.png: # | 标签 | 协议 | 地址 | 流量 | 操作)
+ */
 function renderOutbounds() {
   const q = state.search.toLowerCase();
   const filtered = state.outbounds.filter((item) =>
     [item.remark, item.tag, item.type, item.server, item.port].join(' ').toLowerCase().includes(q)
   );
 
-  const rows = filtered.map((item) => {
-    const boundInbounds = state.inbounds.filter((i) => i.outboundTag === item.tag);
-    const detourBadge = item.detour ? `<span class="tag relay">前置链式: ${esc(item.detour)}</span>` : '';
+  const rows = filtered.map((item, idx) => {
+    const protoLabel = item.type === 'direct' ? 'freedom' : (item.type === 'block' ? 'blackhole' : item.type);
+    const netPill = !item.builtin ? `<span class="tag tls">${esc(item.transport || 'tcp')}</span>` : '';
+    const detourPill = item.detour ? `<span class="tag relay">前置: ${esc(item.detour)}</span>` : '';
     const addrText = item.builtin
-      ? '系统内置引擎出站'
+      ? ''
       : (['urltest', 'selector'].includes(item.type)
-          ? `包含节点: ${(item.outbounds || []).join(', ')}`
+          ? (item.outbounds || []).join(', ')
           : `${item.server || '—'}:${item.port || '—'}`);
 
     const pingInfo = state.outboundPings[item.id];
     const pingBadge = pingInfo
       ? (pingInfo.reachable
-          ? `<span class="status valid">${pingInfo.latencyMs} ms</span>`
-          : `<span class="status error" title="${esc(pingInfo.error)}">超时/不通</span>`)
+          ? `<span class="status valid" style="margin-left:6px">${pingInfo.latencyMs} ms</span>`
+          : `<span class="status error" style="margin-left:6px" title="${esc(pingInfo.error)}">超时</span>`)
       : '';
+
+    const upBytes = Number(item.up || 0);
+    const downBytes = Number(item.down || 0);
+    const trafficText = `${fmtBytes(upBytes)} / ${fmtBytes(downBytes)}`;
 
     return `
       <tr>
+        <td><strong>${idx + 1}</strong></td>
         <td>
-          <strong>${esc(item.remark)}</strong>
-          <small>Tag: <code>${esc(item.tag)}</code></small>
+          <strong>${esc(item.tag)}</strong>
+          ${item.remark && item.remark !== item.tag ? `<small>${esc(item.remark)}</small>` : ''}
         </td>
         <td>
-          <span class="tag">${esc(item.type.toUpperCase())}</span>
-          ${item.security && item.security !== 'none' ? `<span class="tag tls">${esc(item.security.toUpperCase())}</span>` : ''}
-          ${detourBadge}
+          <span class="tag" style="background:rgba(138,78,247,.12);color:#8a4ef7">${esc(protoLabel)}</span>
+          ${netPill}${detourPill}
         </td>
         <td>
-          <strong>${esc(addrText)}</strong> ${pingBadge}
-          ${item.method ? `<small>加密: ${esc(item.method)}</small>` : ''}
+          <strong>${esc(addrText)}</strong>${pingBadge}
         </td>
         <td>
-          ${boundInbounds.length
-            ? boundInbounds.map((i) => `<span class="tag relay">入站: ${esc(i.remark)}</span>`).join('')
-            : '<small>可在入站节点或分流规则中引用</small>'}
-        </td>
-        <td>
-          <span class="status ${item.enabled !== false ? 'active' : 'disabled'}">${item.enabled !== false ? '已启用' : '已停用'}</span>
+          <span class="status valid">${esc(trafficText)}</span>
         </td>
         <td>
           <div class="actions">
-            ${item.builtin ? '<small class="muted">系统保留</small>' : `
-              ${item.server ? `<button data-action="ping-outbound" data-id="${esc(item.id)}">⚡ 测速</button>` : ''}
+            ${item.builtin ? `
+              <button data-action="reset-outbound-traffic" data-id="${esc(item.id)}">重置流量</button>
+            ` : `
               <button data-action="edit-outbound" data-id="${esc(item.id)}">编辑</button>
+              <button data-action="reset-outbound-traffic" data-id="${esc(item.id)}">重置流量</button>
+              ${item.server ? `<button data-action="ping-outbound" data-id="${esc(item.id)}">⚡ 测速</button>` : ''}
               <button class="danger" data-action="delete-outbound" data-id="${esc(item.id)}">删除</button>
             `}
           </div>
@@ -561,18 +614,18 @@ function renderOutbounds() {
 
   return `
     <div class="page-intro">
-      <p>管理中转落地节点与外部代理出站。支持直接粘贴外部节点的分享链接（vless://、ss://、hy2://、anytls://、trojan://、vmess://、socks5://、tuic://）一键解析为 Sing-box 出站，并支持一键测试本机到落地机的 TCP 延迟。</p>
+      <p>采用 3x-ui 经典出站规则列表视图（显示出站标签、协议、地址与实时上下行流量）。支持单条或**批量多行粘贴**外部落地节点链接（<code>ss://</code>、<code>socks://</code>、<code>vless://</code>、<code>hy2://</code>、<code>anytls://</code> 等）一键生成出站，并在【路由与转发规则】中清晰绑定入站 ➔ 出站。</p>
       <div style="display:flex;flex-wrap:wrap;gap:8px">
         <button data-action="ping-all-outbounds">⚡ 批量检测全部出站延迟</button>
-        <button data-action="import-outbound-uri">🔗 粘贴节点链接一键导入</button>
-        <button class="primary" data-action="add-outbound">＋ 手动添加出站节点</button>
+        <button data-action="import-outbound-uri">🔗 批量粘贴链接导入出站</button>
+        <button class="primary" data-action="add-outbound">＋ 添加出站</button>
       </div>
     </div>
 
     <section class="panel">
       <div class="panel-head">
         <div class="toolbar">
-          <input class="search" data-search placeholder="搜索出站备注、Tag、协议或落地服务器地址..." value="${esc(state.search)}">
+          <input class="search" data-search placeholder="搜索出站标签 (如 ace荷包蛋 / NTT 193)、协议或 IP 地址..." value="${esc(state.search)}">
           <span class="tag">共 ${state.outbounds.length} 个出站</span>
         </div>
       </div>
@@ -580,12 +633,12 @@ function renderOutbounds() {
         <table>
           <thead>
             <tr>
-              <th>出站备注 / Tag</th>
-              <th>协议类型</th>
-              <th>目标落地地址 / 延迟</th>
-              <th>关联中转入站</th>
-              <th>状态</th>
-              <th>操作</th>
+              <th style="width:60px">#</th>
+              <th>标签 (Tag)</th>
+              <th>协议 (Protocol)</th>
+              <th>地址 (Address)</th>
+              <th>流量 (上行 / 下行)</th>
+              <th style="text-align:right">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -597,45 +650,66 @@ function renderOutbounds() {
   `;
 }
 
+/**
+ * 3x-ui Style Multi-Column Routing & Forwarding Table (对照用户截图 image_2eeb24.png:
+ * # | 来源 (IP / 端口) | 网络 (L4 / 协议) | 目标地址 (IP / 域名 / 端口) | 入站 (标签 / 客户) | 出站 | 操作)
+ */
 function renderRouting() {
-  const rules = state.routing.rules || [];
+  const rules = (state.routing.rules || []).filter((r) => r.action !== 'sniff');
   const outboundOpts = state.outbounds
-    .map((o) => `<option value="${esc(o.tag)}"${selected(o.tag, state.routing.final)}>${esc(o.remark)} (${esc(o.tag)})</option>`)
+    .map((o) => `<option value="${esc(o.tag)}"${selected(o.tag, state.routing.final)}>${esc(o.tag)}${o.server ? ` (${o.server}:${o.port})` : ''}</option>`)
+    .join('');
+
+  const quickInboundOpts = state.inbounds
+    .map((i) => `<option value="${esc(i.tag)}">${esc(i.tag)} (${esc(i.remark)} :${i.port})</option>`)
+    .join('');
+  const quickOutboundOpts = state.outbounds
+    .filter((o) => o.tag !== 'block')
+    .map((o) => `<option value="${esc(o.tag)}">${esc(o.tag)}${o.server ? ` (${o.server}:${o.port})` : ` (${o.remark})`}</option>`)
     .join('');
 
   const rows = rules.map((r, idx) => {
-    const conds = [];
-    if (r.inbound?.length) conds.push(`入站: ${r.inbound.join(', ')}`);
-    if (r.domain?.length) conds.push(`域名/Geosite: ${r.domain.join(', ')}`);
-    if (r.domain_suffix?.length) conds.push(`后缀: ${r.domain_suffix.join(', ')}`);
-    if (r.domain_keyword?.length) conds.push(`关键词: ${r.domain_keyword.join(', ')}`);
-    if (r.ip_cidr?.length) conds.push(`IP/GeoIP: ${r.ip_cidr.join(', ')}`);
-    if (r.source_ip_cidr?.length) conds.push(`源IP: ${r.source_ip_cidr.join(', ')}`);
-    if (r.port?.length) conds.push(`端口: ${r.port.join(', ')}`);
-    if (r.protocol?.length) conds.push(`协议: ${r.protocol.join(', ')}`);
-    if (r.network) conds.push(`网络: ${r.network.toUpperCase()}`);
-    if (r.rule_set?.length) conds.push(`规则集: ${r.rule_set.join(', ')}`);
-    if (r.ip_is_private) conds.push('私有内网 IP (ip_is_private)');
+    const srcIp = (r.source_ip_cidr || []).join(', ');
+    const srcPort = (r.source_port || []).join(', ');
+    const l4 = r.network ? r.network.toUpperCase() : '';
+    const proto = (r.protocol || []).join(', ');
+    const dstIp = [
+      ...(r.ip_is_private ? ['geoip:private'] : []),
+      ...(r.ip_cidr || []),
+      ...(r.rule_set || []).filter((x) => x.startsWith('geoip-'))
+    ].join(', ');
+    const dstDomain = [
+      ...(r.domain || []),
+      ...(r.domain_suffix || []),
+      ...(r.domain_keyword || []).map((k) => `keyword:${k}`),
+      ...(r.rule_set || []).filter((x) => x.startsWith('geosite-'))
+    ].join(', ');
+    const dstPort = (r.port || []).join(', ');
+    const inbTags = (r.inbound || []).join(', ');
+    const users = (r.user || r.auth_user || []).join(', ');
+    const outTag = r.outbound || 'direct';
 
-    const targetHtml = r.action === 'sniff'
-      ? '<span class="tag">协议嗅探 (Sniff)</span>'
-      : (r.outbound === 'block'
-          ? '<span class="status disabled">拦截 (block)</span>'
-          : (r.outbound === 'direct'
-              ? '<span class="tag tls">直连 (direct)</span>'
-              : `<span class="tag relay">⇄ 路由至: ${esc(r.outbound)}</span>`));
+    const outBadgeClass = outTag === 'block' ? 'status disabled' : (outTag === 'direct' ? 'tag tls' : 'tag relay');
 
     return `
       <tr>
-        <td><strong>#${idx + 1}</strong></td>
-        <td><strong>${esc(r.remark || '分流规则')}</strong></td>
-        <td><small style="max-width:520px">${esc(conds.join(' · ') || '全局匹配')}</small></td>
-        <td>${targetHtml}</td>
-        <td><span class="status ${r.enabled !== false ? 'active' : 'disabled'}">${r.enabled !== false ? '启用' : '停用'}</span></td>
+        <td><strong>⇅ ${idx + 1}</strong></td>
+        <td><small>${esc(srcIp)}</small></td>
+        <td><small>${esc(srcPort)}</small></td>
+        <td><small>${esc(l4)}</small></td>
+        <td><small>${esc(proto)}</small></td>
+        <td><small>${esc(dstIp)}</small></td>
+        <td><small>${esc(dstDomain)}</small></td>
+        <td><small>${esc(dstPort)}</small></td>
+        <td><strong>${esc(inbTags)}</strong></td>
+        <td><small>${esc(users)}</small></td>
+        <td><span class="${outBadgeClass}">${esc(outTag)}</span></td>
         <td>
           <div class="actions">
-            <button data-action="move-rule" data-id="${esc(r.id)}" data-dir="up" title="上移优先级">↑</button>
-            <button data-action="move-rule" data-id="${esc(r.id)}" data-dir="down" title="下移优先级">↓</button>
+            <button data-action="move-rule" data-id="${esc(r.id)}" data-dir="up" title="向上移动">↑</button>
+            <button data-action="move-rule" data-id="${esc(r.id)}" data-dir="down" title="向下移动">↓</button>
+            <button data-action="move-rule" data-id="${esc(r.id)}" data-dir="top" title="置顶">⤒</button>
+            <button data-action="move-rule" data-id="${esc(r.id)}" data-dir="bottom" title="置底">⤓</button>
             <button data-action="edit-rule" data-id="${esc(r.id)}">编辑</button>
             <button class="danger" data-action="delete-rule" data-id="${esc(r.id)}">删除</button>
           </div>
@@ -646,62 +720,84 @@ function renderRouting() {
 
   return `
     <div class="page-intro">
-      <p>支持 3x-ui 风格的多维度路由分流（按入站 Tag、Geosite/域名后缀/关键词、GeoIP/CIDR、端口、协议类型如 BitTorrent/QUIC、私有网络匹配），自动编译为 Sing-box 高性能路由表与 SRS 规则集。</p>
-      <button class="primary" data-action="add-rule">＋ 添加分流规则</button>
+      <p>完全还原 3x-ui 经典多列路由转发视图（来源、网络、目标地址、入站标签、客户/用户、目标出站一目了然）。每条入站中转映射（如 <code>inbound-48741 ➔ US-tsnzqn15</code>）均可直观排序、置顶、置底与编辑。</p>
+      <div style="display:flex;gap:8px">
+        <button data-action="Switch-to-outbounds">⇄ 管理出站规则</button>
+        <button class="primary" data-action="add-rule">＋ 添加路由规则</button>
+      </div>
     </div>
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>全局默认路由与一键分流模板</h2><p>按从上到下的顺序依次匹配分流规则；未命中任何规则时走下方“默认兜底出站”</p></div>
+        <div>
+          <h2>⚡ 3x-ui 模式：快速添加入站 ➔ 出站一对一中转规则</h2>
+          <p>选择本机某个入站节点标签，并指定转发至哪个出站节点，点击右侧按钮即可一键加入下方路由规则表</p>
+        </div>
       </div>
       <div class="panel-body">
-        <div class="form-grid" style="margin-bottom:14px">
+        <div class="form-grid" style="grid-template-columns:1fr 1fr auto;align-items:end;margin-bottom:16px">
           <label>
-            默认兜底出站 (Final Outbound)
-            <select id="routing-final-select">${outboundOpts}</select>
+            选择入站标签 (Inbound Tag)
+            <select id="quick-relay-inbound">
+              ${quickInboundOpts || '<option value="">— 请先在【入站节点管理】创建入站 —</option>'}
+            </select>
           </label>
           <label>
-            DNS 解析 IP 策略
-            <div class="input-row">
-              <select id="routing-dns-select">
-                <option value="prefer_ipv4"${selected('prefer_ipv4', state.dns.strategy)}>优先 IPv4 (prefer_ipv4)</option>
-                <option value="prefer_ipv6"${selected('prefer_ipv6', state.dns.strategy)}>优先 IPv6 (prefer_ipv6)</option>
-                <option value="ipv4_only"${selected('ipv4_only', state.dns.strategy)}>仅 IPv4 (ipv4_only)</option>
-                <option value="ipv6_only"${selected('ipv6_only', state.dns.strategy)}>仅 IPv6 (ipv6_only)</option>
-              </select>
-              <button class="primary" data-action="save-routing-global">保存全局策略</button>
-            </div>
+            转发至目标出站 (Outbound Tag)
+            <select id="quick-relay-outbound">
+              ${quickOutboundOpts}
+            </select>
           </label>
+          <button class="primary" data-action="quick-add-relay-rule" style="height:40px">＋ 立即绑定转发规则</button>
         </div>
 
-        <div class="quick-bar" style="margin-bottom:0">
-          <span>⚡ 一键添加 3x-ui 常用分流规则:</span>
-          <button data-action="routing-preset" data-preset="block-ads">🛡 屏蔽广告域名 (Ads -> Block)</button>
-          <button data-action="routing-preset" data-preset="cn-direct">🇨🇳 大陆域名与 IP 直连 (CN -> Direct)</button>
-          <button data-action="routing-preset" data-preset="ai-relay">🤖 OpenAI / Claude / Gemini 分流</button>
-          <button data-action="routing-preset" data-preset="media-relay">🎬 Netflix / YouTube / Disney+ 分流</button>
+        <div class="quick-bar" style="margin-bottom:0;justify-content:space-between">
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+            <span>⚡ 常用分流预设:</span>
+            <button data-action="routing-preset" data-preset="block-ads">🛡 屏蔽广告域名</button>
+            <button data-action="routing-preset" data-preset="cn-direct">🇨🇳 大陆域名与 IP 直连</button>
+            <button data-action="routing-preset" data-preset="ai-relay">🤖 OpenAI / Claude 分流</button>
+            <button data-action="routing-preset" data-preset="media-relay">🎬 Netflix / YouTube 分流</button>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span class="muted">默认兜底出站:</span>
+            <select id="routing-final-select" style="width:170px;min-height:34px;padding:4px 8px">${outboundOpts}</select>
+            <button data-action="save-routing-global">保存兜底</button>
+          </div>
         </div>
       </div>
     </section>
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>分流规则列表 (${rules.length} 条)</h2><p>说明：入站节点直接绑定的中转出站会自动置于自定义规则之前优先转发</p></div>
+        <div><h2>路由规则列表 (共 ${rules.length} 条)</h2><p>按从上往下顺序匹配；入站与出站支持双向自动同步</p></div>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="xui-routing-table">
           <thead>
             <tr>
-              <th>优先级</th>
-              <th>规则备注</th>
-              <th>匹配条件 (入站 / 域名 / IP / 端口 / 协议)</th>
-              <th>目标出站 / 动作</th>
-              <th>状态</th>
-              <th>操作</th>
+              <th rowspan="2" style="width:65px">#</th>
+              <th colspan="2" style="text-align:center;border-bottom:1px solid var(--line)">来源</th>
+              <th colspan="2" style="text-align:center;border-bottom:1px solid var(--line)">网络</th>
+              <th colspan="3" style="text-align:center;border-bottom:1px solid var(--line)">目标地址</th>
+              <th colspan="2" style="text-align:center;border-bottom:1px solid var(--line)">入站</th>
+              <th rowspan="2">出站</th>
+              <th rowspan="2" style="text-align:right">操作</th>
+            </tr>
+            <tr>
+              <th>IP</th>
+              <th>端口</th>
+              <th>L4</th>
+              <th>协议</th>
+              <th>IP</th>
+              <th>域名</th>
+              <th>端口</th>
+              <th>标签 (Tag)</th>
+              <th>客户/用户</th>
             </tr>
           </thead>
           <tbody>
-            ${rows || '<tr><td colspan="6"><div class="empty"><b>暂无自定义分流规则</b><span>可点击上方快捷模板或添加规则</span></div></td></tr>'}
+            ${rows || '<tr><td colspan="12"><div class="empty"><b>暂无路由规则</b><span>可使用上方“快速添加入站 ➔ 出站”或点击“＋ 添加路由规则”</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -743,7 +839,7 @@ function renderMigrate() {
 
   return `
     <div class="page-intro">
-      <p>完全兼容 3x-ui 的 SQLite 数据库 (<code>x-ui.db</code>)、打包备份文件 (如 <code>3xui_backup.tar.gz</code>) 与 Xray 配置文件。无损迁移全部入站节点（保留原端口、UUID、密码、Reality 公私钥、shortIds、TLS 证书路径、客户端 IP 限制与流量）、Dokodemo 端口转发、全部中转出站及路由分流规则。</p>
+      <p>完全兼容 3x-ui 的 SQLite 数据库 (<code>x-ui.db</code>)、打包备份文件 (如 <code>3xui_backup.tar.gz</code>) 与 Xray 配置文件。无损迁移全部入站节点（保留原端口、UUID、密码、Reality 公私钥、shortIds、TLS 证书路径、客户端 IP 限制与流量）、Dokodemo 端口转发、全部中转出站及路由转发规则。</p>
     </div>
 
     ${previewHtml}
@@ -764,7 +860,7 @@ function renderMigrate() {
             迁移合并策略
             <select id="migrate-mode">
               <option value="merge">智能合并（保留当前面板已有节点，同端口/同Tag自动更新）</option>
-              <option value="replace">完整替换（清空当前节点，100% 还原为 3x-ui 的入站、出站与分流）</option>
+              <option value="replace">完整替换（清空当前节点，100% 还原为 3x-ui 的入站、出站与路由转发）</option>
             </select>
           </label>
 
@@ -821,11 +917,7 @@ function renderMigrate() {
 
 function renderCertificates() {
   const s = state.settings || {};
-  const proto = window.location.protocol;
-  const host = s.webDomain || s.publicIPv4 || window.location.hostname || '127.0.0.1';
-  const portPart = window.location.port ? `:${window.location.port}` : (s.webPort ? `:${s.webPort}` : '');
-  const subPath = (s.subPath || '/sub/').replace(/\/+$/, '');
-  const baseSubUrl = `${proto}//${host}${portPart}${subPath}/all`;
+  const baseSubUrl = getBaseSubscriptionUrl('all');
 
   const certRows = (state.certificates || []).map((c) => {
     const isPanelCert = s.webCertFile === c.certPath;
@@ -838,8 +930,8 @@ function renderCertificates() {
         </td>
         <td>
           <span class="tag">${esc(c.type || 'cert')}</span>
-          ${isPanelCert ? '<span class="tag tls">面板 HTTPS</span>' : ''}
-          ${isNodeDefault ? '<span class="tag relay">节点默认证书</span>' : ''}
+          ${isPanelCert ? '<span class="tag tls">当前面板 HTTPS</span>' : ''}
+          ${isNodeDefault ? '<span class="tag relay">当前节点默认证书</span>' : ''}
         </td>
         <td>
           <small>公钥: <code>${esc(c.certPath)}</code></small>
@@ -854,7 +946,7 @@ function renderCertificates() {
         </td>
         <td>
           <div class="actions">
-            <button class="primary" data-action="bind-cert-all" data-id="${esc(c.id)}">设为面板与节点通用证书</button>
+            <button class="primary" data-action="bind-cert-all" data-id="${esc(c.id)}">设为面板与节点默认证书</button>
             <button class="danger" data-action="delete-cert" data-id="${esc(c.id)}">移除</button>
           </div>
         </td>
@@ -864,9 +956,9 @@ function renderCertificates() {
 
   return `
     <div class="page-intro">
-      <p>类似 3x-ui，申请或生成 SSL 证书后会自动同步绑定为**面板 HTTPS 证书**与**所有 TLS 节点（AnyTLS / Hysteria 2 / VLESS-TLS / Trojan / TUIC）的默认证书**，新建节点时无需再次手动填写路径。同时自动扫描并导入本机 <code>/root/cert/*</code> 下已有的 3x-ui 证书。</p>
+      <p>自动扫描并优先启用本机已申请的 ACME 域名证书（如 <code>/root/cert/*</code>），自动替换初始自签证书并同步设为**面板 HTTPS 证书**与**所有 TLS 节点默认证书**，新建节点时默认即为已申请的证书域名。</p>
       <div style="display:flex;flex-wrap:wrap;gap:8px">
-        <button data-action="cert-selfsigned">⚡ 一键生成 10 年自签证书 (免域名)</button>
+        <button data-action="cert-selfsigned">⚡ 生成 10 年自签证书 (免域名)</button>
         <button data-action="cert-custom">📋 粘贴 / 导入已有证书</button>
         <button class="primary" data-action="cert-acme">🌐 ACME 自动申请证书 (域名 / CF DNS / IP证书)</button>
       </div>
@@ -874,13 +966,13 @@ function renderCertificates() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>SSL 证书管理列表 (${state.certificates.length} 张)</h2><p>当前节点默认 TLS 域名: <b>${esc(s.defaultTlsDomain || s.webDomain || 'www.bing.com')}</b></p></div>
+        <div><h2>SSL 证书管理列表 (${state.certificates.length} 张)</h2><p>当前默认证书域名: <b>${esc(s.webDomain || s.defaultTlsDomain || '未绑定域名')}</b></p></div>
       </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>域名 / 标识</th><th>用途与类型</th><th>证书文件路径</th><th>到期时间 / 签发者</th><th>状态</th><th>操作</th></tr></thead>
           <tbody>
-            ${certRows || '<tr><td colspan="6"><div class="empty"><b>尚未添加自定义或 ACME 证书</b><span>点击右上角“⚡ 一键生成 10 年自签证书”或“🌐 ACME 自动申请证书”即可一键配置面板与节点证书</span></div></td></tr>'}
+            ${certRows || '<tr><td colspan="6"><div class="empty"><b>尚未添加自定义或 ACME 证书</b><span>点击右上角“🌐 ACME 自动申请证书”即可一键配置面板与节点证书</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -930,12 +1022,12 @@ function renderSettings() {
   const s = state.settings || {};
   const certSelectOpts = [
     '<option value="">— 手动输入路径或不使用 HTTPS —</option>',
-    ...(state.certificates || []).map((c) => `<option value="${esc(c.certPath)}|${esc(c.keyPath)}"${s.webCertFile === c.certPath ? ' selected' : ''}>${esc(c.domain)} (${esc(c.type)})</option>`)
+    ...(state.certificates || []).map((c) => `<option value="${esc(c.certPath)}|${esc(c.keyPath)}|${esc(c.domain)}"${s.webCertFile === c.certPath ? ' selected' : ''}>${esc(c.domain)} (${esc(c.type)})</option>`)
   ].join('');
 
   return `
     <div class="page-intro">
-      <p>配置面板端口（支持一键随机端口）、安全访问根路径（<code>webBasePath</code>）、公网 IP / 域名、面板 HTTPS 证书以及管理员账号密码。</p>
+      <p>配置面板端口（支持一键随机端口）、16 位高强度随机安全路径（<code>webBasePath</code>，默认单 IP+端口返回 404，必须携带安全路径才可访问）、公网 IP / 域名、面板 HTTPS 证书以及管理员账号密码。</p>
       <div style="display:flex;gap:8px">
         <a class="button" href="${BASE_PATH}/api/backup" target="_blank">⬇ 导出完整面板备份 (.json)</a>
         <button data-action="restore-backup-modal">⬆ 导入恢复备份</button>
@@ -961,17 +1053,17 @@ function renderSettings() {
           </label>
 
           <label class="wide">
-            面板安全根路径 (webBasePath)
+            面板安全根路径 (webBasePath · 推荐 16 位随机字符)
             <div class="input-row">
-              <input name="webBasePath" id="setting-webpath" value="${esc(s.webBasePath || '/')}" placeholder="/ 或 /secretpath/">
-              <button type="button" data-action="random-path">🎲 随机安全路径</button>
+              <input name="webBasePath" id="setting-webpath" value="${esc(s.webBasePath || '/')}" placeholder="/44A8m9DxlT7A7AbK/">
+              <button type="button" data-action="random-path">🎲 生成 16 位随机安全路径</button>
               <button type="button" data-action="reset-path">设为 /</button>
             </div>
           </label>
 
           <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
-            <input type="checkbox" name="strictBasePath" style="width:16px;min-height:16px" ${s.strictBasePath ? 'checked' : ''}>
-            <span>开启严格隐身模式（访问根路径 <code>/</code> 时直接返回 404，不自动跳转到安全路径）</span>
+            <input type="checkbox" name="strictBasePath" style="width:16px;min-height:16px" ${s.strictBasePath !== false ? 'checked' : ''}>
+            <span><b>禁止单 IP+端口直接访问面板</b>（默认开启：访问无安全路径的 <code>IP:端口/</code> 直接返回 404，必须通过 <code>IP/域名:端口/安全路径/</code> 访问）</span>
           </label>
 
           <label>
@@ -979,8 +1071,8 @@ function renderSettings() {
             <input name="publicIPv4" value="${esc(s.publicIPv4 || '')}" placeholder="如 216.23.82.153">
           </label>
           <label>
-            面板 / 节点真实域名 (webDomain，无域名可留空)
-            <input name="webDomain" value="${esc(s.webDomain || '')}" placeholder="如 gate.example.com (无域名请留空)">
+            面板 / 节点绑定域名 (webDomain)
+            <input name="webDomain" id="setting-webdomain" value="${esc(s.webDomain || '')}" placeholder="如 cs.vponlive.com">
           </label>
 
           <div class="section-title">面板 HTTPS (SSL 证书配置)</div>
@@ -1030,11 +1122,17 @@ function renderSettings() {
             </label>
             <label>
               新管理员账号
-              <input name="username" value="${esc(state.admin.username || 'admin')}" required>
+              <div class="input-row">
+                <input name="username" id="account-user-input" value="${esc(state.admin.username || 'admin')}" required>
+                <button type="button" data-action="random-account-user">🎲 随机</button>
+              </div>
             </label>
             <label>
-              新登录密码 (至少 6 位)
-              <input name="newPassword" type="password" required placeholder="输入新密码">
+              新登录密码 (推荐 16 位高强度随机密码)
+              <div class="input-row">
+                <input name="newPassword" id="account-pass-input" type="text" required placeholder="输入或点击右侧随机生成">
+                <button type="button" data-action="random-account-pass">🎲 随机 18 位</button>
+              </div>
             </label>
             <div class="form-actions">
               <button type="submit" class="primary">修改账号与密码</button>
@@ -1050,7 +1148,7 @@ function renderSettings() {
             <div class="command-item"><div><b>呼出 0-25 完整交互式管理菜单 (含 SSL / BBR+HY2 / 防火墙)</b><code>ng</code> 或 <code>nexusgate</code></div><button data-copy="ng">复制</button></div>
             <div class="command-item"><div><b>查看当前面板完整登录链接、端口与证书状态</b><code>ng info</code></div><button data-copy="ng info">复制</button></div>
             <div class="command-item"><div><b>一键开启 BBR + FQ + HY2 UDP 高速内核加速</b><code>ng bbr</code></div><button data-copy="ng bbr">复制</button></div>
-            <div class="command-item"><div><b>SSL 证书管理 (无域名十年自签 / ACME / CF DNS / IP证书)</b><code>ng cert</code></div><button data-copy="ng cert">复制</button></div>
+            <div class="command-item"><div><b>SSL 证书管理 (ACME / CF DNS / IP证书 / 自签证书)</b><code>ng cert</code></div><button data-copy="ng cert">复制</button></div>
             <div class="command-item"><div><b>一键无损迁移本机 3x-ui 数据库或备份包</b><code>ng migrate</code></div><button data-copy="ng migrate">复制</button></div>
           </div>
         </article>
@@ -1075,21 +1173,27 @@ function render() {
 /* ==================== MODALS & ACTIONS ==================== */
 
 async function openInboundModal(existing = null, preset = '') {
-  const defTlsDomain = state.defaultSettings?.defaultTlsDomain || state.settings?.webDomain || 'www.bing.com';
-  const defCertFile = state.defaultSettings?.defaultCertFile || state.settings?.webCertFile || '';
-  const defKeyFile = state.defaultSettings?.defaultKeyFile || state.settings?.webKeyFile || '';
+  const realCert = (state.certificates || []).find((c) => c.type !== 'self-signed' && c.valid !== false);
+  const defTlsDomain = realCert?.domain || state.settings?.webDomain || state.defaultSettings?.defaultTlsDomain || 'www.apple.com';
+  const defCertFile = realCert?.certPath || state.defaultSettings?.defaultCertFile || state.settings?.webCertFile || '';
+  const defKeyFile = realCert?.keyPath || state.defaultSettings?.defaultKeyFile || state.settings?.webKeyFile || '';
+
+  const newUuid = genUuidClient();
+  const newPass = genRandomAlnum(20);
+  const portRand = Math.floor(Math.random() * 40000) + 15000;
 
   const item = existing ? JSON.parse(JSON.stringify(existing)) : {
     remark: '',
-    tag: '',
+    tag: `inbound-${portRand}`,
     protocol: 'vless',
     listen: '::',
-    port: Math.floor(Math.random() * 40000) + 15000,
+    port: portRand,
     security: 'reality',
     transport: 'tcp',
     flow: 'xtls-rprx-vision',
     method: '2022-blake3-aes-128-gcm',
-    password: '',
+    uuid: newUuid,
+    password: newPass,
     outboundTag: 'default',
     limitIp: 0,
     total: 0,
@@ -1104,7 +1208,7 @@ async function openInboundModal(existing = null, preset = '') {
       shortIds: ['1a2b3c4d'],
       fingerprint: 'chrome'
     },
-    clients: [{ email: 'user_1', id: '', password: '', flow: 'xtls-rprx-vision', enable: true }]
+    clients: [{ email: 'user_1', id: newUuid, password: newPass, flow: 'xtls-rprx-vision', enable: true }]
   };
 
   if (preset) {
@@ -1135,7 +1239,7 @@ async function openInboundModal(existing = null, preset = '') {
       item.reality.shortIds = [kp.shortId];
     } catch { /* fallback on submit */ }
   }
-  if (!existing && !item.password) {
+  if (!existing && item.protocol === 'shadowsocks') {
     try {
       const sk = await api('/api/tools/ss-key', { method: 'POST', body: JSON.stringify({ method: item.method }) });
       item.password = sk.password;
@@ -1144,25 +1248,26 @@ async function openInboundModal(existing = null, preset = '') {
 
   const outboundOpts = [
     `<option value="default"${selected('default', item.outboundTag)}>默认路由 (按分流规则表处理)</option>`,
-    ...state.outbounds.map((o) => `<option value="${esc(o.tag)}"${selected(o.tag, item.outboundTag)}>${o.builtin ? '' : '⇄ 中转出站: '}${esc(o.remark)} (${esc(o.tag)})</option>`)
+    ...state.outbounds.map((o) => `<option value="${esc(o.tag)}"${selected(o.tag, item.outboundTag)}>${o.builtin ? '' : '⇄ 绑定中转出站: '}${esc(o.tag)}${o.server ? ` (${o.server}:${o.port})` : ` (${o.remark})`}</option>`)
   ].join('');
 
   const certOpts = [
-    '<option value="">自动使用面板已绑定默认证书 / 10年自签证书</option>',
+    `<option value="">默认绑定证书 (${esc(defTlsDomain)})</option>`,
     ...(state.certificates || []).map((c) => `<option value="${esc(c.domain)}" data-cert="${esc(c.certPath)}" data-key="${esc(c.keyPath)}"${selected(c.domain, item.tlsDomain)}>${esc(c.domain)} (${esc(c.type)})</option>`)
   ].join('');
 
   const c0 = (item.clients && item.clients[0]) || {};
+  const clientUuidVal = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(String(c0.id || '')) ? c0.id : (item.uuid || genUuidClient());
   const totalGB = item.total > 0 ? Math.round(item.total / (1024 ** 3)) : 0;
 
   openModal(
     existing ? '编辑入站节点' : '新建入站节点',
-    existing ? `${existing.remark} (:${existing.port})` : '配置 Sing-box 入站协议、IP 设备数限制与中转绑定',
+    existing ? `${existing.remark} (:${existing.port})` : '配置 Sing-box 入站协议、IP 设备限制与中转出站绑定',
     `
     <form id="inbound-form" class="form-grid" data-id="${esc(existing?.id || '')}">
       <label>
         节点备注名称
-        <input name="remark" value="${esc(item.remark)}" placeholder="如 香港-VLESS-Reality" required>
+        <input name="remark" value="${esc(item.remark)}" placeholder="如 JP-VLESS-Reality" required>
       </label>
       <label>
         入站协议 (Protocol)
@@ -1186,7 +1291,7 @@ async function openInboundModal(existing = null, preset = '') {
       <label>
         限制同时在线 IP / 设备数 (0 = 不限制)
         <input name="limitIp" type="number" min="0" max="1000" value="${esc(item.limitIp || 0)}" placeholder="0 表示不限制设备数">
-        <small>超出设定 IP 数量的设备新连接将被自动实时断开</small>
+        <small>超出设定 IP 数量的设备新连接将被实时自动断开</small>
       </label>
       <label>
         总流量配额上限 (GB，0 = 不限制)
@@ -1195,9 +1300,8 @@ async function openInboundModal(existing = null, preset = '') {
       </label>
 
       <label class="wide">
-        ⇄ 指定出站 / 中转落地节点绑定 (Inbound -> Outbound Relay)
+        ⇄ 一键绑定转发目标出站 (保存后将自动同步至【路由与转发规则】表)
         <select name="outboundTag">${outboundOpts}</select>
-        <small>若选择某个中转出站节点，进入此入站的所有流量将直接通过该出站节点转发。</small>
       </label>
 
       <div id="inb-dynamic-fields" class="form-grid wide" style="margin:0"></div>
@@ -1253,7 +1357,7 @@ async function openInboundModal(existing = null, preset = '') {
             <input name="password" id="inb-ss-pass" value="${esc(item.password || '')}" required>
             <button type="button" data-action="gen-ss-key">🔑 生成标准密钥</button>
           </div>
-          <small>已针对全客户端优化：单用户默认采用标准 SIP002 Base64 格式，Shadowrocket / v2rayN / Clash 直接可用。</small>
+          <small>自动适配 v2rayN / Shadowrocket / Clash / Sing-box 全客户端。</small>
         </label>
         <label class="wide">
           客户端标识名称 (Email/Remark)
@@ -1268,11 +1372,11 @@ async function openInboundModal(existing = null, preset = '') {
         <div class="section-title">SOCKS5 认证凭据</div>
         <label>
           SOCKS5 用户名
-          <input name="socksUser" value="${esc(item.socksUser || c0.username || 'ng_user')}" required>
+          <input name="socksUser" value="${esc(item.socksUser || c0.username || `user_${genRandomAlnum(6)}`)}" required>
         </label>
         <label>
           SOCKS5 密码
-          <input name="socksPassword" value="${esc(item.socksPassword || c0.password || '')}" required>
+          <input name="socksPassword" value="${esc(item.socksPassword || c0.password || genRandomAlnum(16))}" required>
         </label>
       `;
       return;
@@ -1280,10 +1384,13 @@ async function openInboundModal(existing = null, preset = '') {
 
     if (proto === 'anytls') {
       box.innerHTML = `
-        <div class="section-title">AnyTLS 认证与 TLS 证书配置 (已自动预填面板默认证书)</div>
+        <div class="section-title">AnyTLS 认证与 TLS 证书配置 (已自动预填申请的域名证书: ${esc(defTlsDomain)})</div>
         <label>
           AnyTLS 访问密码
-          <input name="password" value="${esc(item.password || c0.password || '')}" required>
+          <div class="input-row">
+            <input name="password" id="inb-anytls-pass" value="${esc(item.password || c0.password || genRandomAlnum(20))}" required>
+            <button type="button" data-action="gen-clean-pass" data-target="inb-anytls-pass">🎲 随机</button>
+          </div>
         </label>
         <label>
           客户端标识 (用户名)
@@ -1298,12 +1405,12 @@ async function openInboundModal(existing = null, preset = '') {
           <input name="tlsDomain" id="inb-tls-domain" value="${esc(item.tlsDomain || defTlsDomain)}">
         </label>
         <label>
-          证书路径 (留空自动使用默认证书/10年自签)
-          <input name="certPath" id="inb-cert-path" value="${esc(item.certPath || defCertFile)}" placeholder="自动绑定默认证书">
+          证书公钥路径
+          <input name="certPath" id="inb-cert-path" value="${esc(item.certPath || defCertFile)}" placeholder="自动使用默认证书">
         </label>
         <label>
-          私钥路径
-          <input name="keyPath" id="inb-key-path" value="${esc(item.keyPath || defKeyFile)}" placeholder="自动绑定默认私钥">
+          证书私钥路径
+          <input name="keyPath" id="inb-key-path" value="${esc(item.keyPath || defKeyFile)}" placeholder="自动使用默认私钥">
         </label>
       `;
       return;
@@ -1311,10 +1418,13 @@ async function openInboundModal(existing = null, preset = '') {
 
     if (proto === 'hysteria2') {
       box.innerHTML = `
-        <div class="section-title">Hysteria 2 (HY2 UDP) 认证与带宽配置 (已自动预填面板默认证书)</div>
+        <div class="section-title">Hysteria 2 (HY2 UDP) 认证与证书配置 (默认域名: ${esc(defTlsDomain)})</div>
         <label>
           HY2 认证密码
-          <input name="password" value="${esc(item.password || c0.password || '')}" required>
+          <div class="input-row">
+            <input name="password" id="inb-hy2-pass" value="${esc(item.password || c0.password || genRandomAlnum(20))}" required>
+            <button type="button" data-action="gen-clean-pass" data-target="inb-hy2-pass">🎲 随机</button>
+          </div>
         </label>
         <label>
           Salamander 混淆密码 (可选)
@@ -1337,11 +1447,11 @@ async function openInboundModal(existing = null, preset = '') {
           <input name="tlsDomain" id="inb-tls-domain" value="${esc(item.tlsDomain || defTlsDomain)}">
         </label>
         <label>
-          证书路径 (留空自动使用默认证书/10年自签)
+          证书公钥路径
           <input name="certPath" id="inb-cert-path" value="${esc(item.certPath || defCertFile)}">
         </label>
         <label>
-          私钥路径
+          证书私钥路径
           <input name="keyPath" id="inb-key-path" value="${esc(item.keyPath || defKeyFile)}">
         </label>
       `;
@@ -1351,12 +1461,27 @@ async function openInboundModal(existing = null, preset = '') {
     // VLESS / Trojan / VMess / TUIC
     const sec = item.security || (proto === 'tuic' ? 'tls' : 'reality');
     const trans = item.transport || 'tcp';
+    const isUuidProto = ['vless', 'vmess', 'tuic'].includes(proto);
+
     box.innerHTML = `
       <div class="section-title">${esc(proto.toUpperCase())} 客户端凭据与传输安全</div>
-      <label>
-        客户端 UUID / 密码
-        <input name="uuid" value="${esc(c0.id || item.password || '')}" placeholder="留空自动生成随机 UUID">
-      </label>
+      ${isUuidProto ? `
+        <label>
+          客户端 UUID (标准 UUID v4 格式)
+          <div class="input-row">
+            <input name="uuid" id="inb-uuid-input" value="${esc(clientUuidVal)}" required>
+            <button type="button" data-action="gen-uuid">🎲 随机 UUID</button>
+          </div>
+        </label>
+      ` : `
+        <label>
+          Trojan 连接密码
+          <div class="input-row">
+            <input name="password" id="inb-trojan-pass" value="${esc(item.password || genRandomAlnum(20))}" required>
+            <button type="button" data-action="gen-clean-pass" data-target="inb-trojan-pass">🎲 随机</button>
+          </div>
+        </label>
+      `}
       <label>
         客户端备注标识 (Email)
         <input name="clientEmail" value="${esc(c0.email || `${proto}_user_1`)}">
@@ -1375,7 +1500,7 @@ async function openInboundModal(existing = null, preset = '') {
         安全层加密 (Security)
         <select name="security" id="inb-sec-select">
           <option value="reality"${selected('reality', sec)}>Reality (免证书高隐蔽 · 推荐)</option>
-          <option value="tls"${selected('tls', sec)}>TLS (自动使用面板证书或10年自签)</option>
+          <option value="tls"${selected('tls', sec)}>TLS (自动使用已申请的域名证书: ${esc(defTlsDomain)})</option>
           <option value="none"${selected('none', sec)}>无加密 (None · 适合内网中转或外层反代)</option>
         </select>
       </label>
@@ -1406,7 +1531,7 @@ async function openInboundModal(existing = null, preset = '') {
           secBox.innerHTML = `
             <div class="section-title">Reality 伪装与 X25519 密钥对</div>
             <label>
-              伪装目标预设 (SNI)
+              伪装目标预设 (SNI · 不含微软域名)
               <select id="inb-reality-preset">
                 <option value="">— 选择常用大厂 SNI 预设 —</option>
                 ${state.catalog.realityPresets.map((p) => `<option value="${esc(p.serverName)}" data-target="${esc(p.target)}"${selected(p.serverName, r.serverName)}>${esc(p.label)}</option>`).join('')}
@@ -1438,7 +1563,7 @@ async function openInboundModal(existing = null, preset = '') {
           `;
         } else if (curSec === 'tls') {
           secBox.innerHTML = `
-            <div class="section-title">TLS 证书配置 (已自动预填面板默认证书)</div>
+            <div class="section-title">TLS 证书配置 (已自动绑定域名证书: ${esc(defTlsDomain)})</div>
             <label>
               选择已管理证书
               <select id="inb-cert-select">${certOpts}</select>
@@ -1448,11 +1573,11 @@ async function openInboundModal(existing = null, preset = '') {
               <input name="tlsDomain" id="inb-tls-domain" value="${esc(item.tlsDomain || defTlsDomain)}">
             </label>
             <label>
-              公钥证书路径 (留空自动使用默认证书)
+              公钥证书路径
               <input name="certPath" id="inb-cert-path" value="${esc(item.certPath || defCertFile)}">
             </label>
             <label>
-              私钥路径
+              私钥文件路径
               <input name="keyPath" id="inb-key-path" value="${esc(item.keyPath || defKeyFile)}">
             </label>
           `;
@@ -1490,20 +1615,22 @@ async function openInboundModal(existing = null, preset = '') {
 
 function openInboundLinksModal(inbound) {
   const links = inbound.links || [];
+  const subToken = (links[0] && links[0].subId) || inbound.tag || 'all';
+  const clientSubUrl = getBaseSubscriptionUrl(subToken);
+  const allSubUrl = getBaseSubscriptionUrl('all');
+
   const rows = links.map((l, idx) => {
-    const qrSvg = window.NexusGateQR ? window.NexusGateQR.svg(l.uri) : '';
+    const qrSvg = makeQrSvg(l.uri);
     return `
       <div class="subscription-row">
         <div>
-          <b>${esc(l.name)} (${esc(l.protocol.toUpperCase())})</b>
-          ${l.isSelfSigned && ['anytls', 'hysteria2', 'trojan', 'tuic', 'vless'].includes(l.protocol) && inbound.security === 'tls'
-            ? '<small style="color:var(--success)">✓ 已自动附加自签证书跳过校验参数 (insecure=1&allowInsecure=1)，各大客户端可直接扫码连接</small>'
-            : ''}
-          <code>${esc(l.uri)}</code>
-          ${l.altUri ? `<small>备用兼容链接: <code>${esc(l.altUri)}</code></small>` : ''}
+          <b>${esc(l.name)} (${esc(l.protocol.toUpperCase())} · 端口 :${inbound.port})</b>
+          <small style="color:var(--success)">✓ 标准合规格式，支持 v2rayN / v2rayNG / Shadowrocket / NekoBox / Mihomo / Sing-box / Hiddify 直接导入或扫码</small>
+          <code style="white-space:normal;word-break:break-all;display:block;margin-top:4px;padding:8px;background:var(--surface);border:1px solid var(--line);border-radius:8px">${esc(l.uri)}</code>
+          ${l.altUri ? `<small style="margin-top:4px">备用兼容链接 (SIP002 / HY2): <code>${esc(l.altUri)}</code></small>` : ''}
         </div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px">
-          <button class="primary" data-copy="${esc(l.uri)}">复制通用链接</button>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;width:100%;justify-content:flex-end">
+          <button class="primary" data-copy="${esc(l.uri)}">📋 复制节点链接</button>
           ${l.altUri ? `<button data-copy="${esc(l.altUri)}">复制备用链接</button>` : ''}
           ${l.clashYaml ? `<button data-copy="${esc(l.clashYaml)}">复制 Clash YAML</button>` : ''}
           ${l.singboxJson ? `<button data-copy="${esc(l.singboxJson)}">复制 Sing-box JSON</button>` : ''}
@@ -1514,12 +1641,41 @@ function openInboundLinksModal(inbound) {
     `;
   }).join('');
 
+  const subQrSvg = makeQrSvg(clientSubUrl);
+
   openModal(
-    `节点分享链接与客户端二维码 · 端口 :${inbound.port}`,
-    `${inbound.remark} (全面支持 Shadowrocket / v2rayN / v2rayNG / NekoBox / Mihomo / Sing-box / Hiddify)`,
+    `节点分享链接、二维码与客户端订阅 · 端口 :${inbound.port}`,
+    `${inbound.remark} (${inbound.protocol.toUpperCase()})`,
     `
     <div class="stack">
+      <div class="section-title" style="margin-top:0">一、单节点分享链接与扫码导入</div>
       ${rows || '<div class="empty"><b>该入站暂无可用客户端链接</b><span>请检查客户端是否已启用</span></div>'}
+
+      <div class="section-title">二、客户端订阅链接 (Subscription URL · 支持自动更新)</div>
+      <div class="subscription-row">
+        <div>
+          <b>当前节点专属订阅地址 (Base64 / Shadowrocket / v2rayN)</b>
+          <code>${esc(clientSubUrl)}</code>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          <button class="primary" data-copy="${esc(clientSubUrl)}">复制 Base64 订阅</button>
+          <button data-copy="${esc(`${clientSubUrl}?format=clash`)}">复制 Clash 订阅</button>
+          <button data-copy="${esc(`${clientSubUrl}?format=singbox`)}">复制 Sing-box 订阅</button>
+          <button data-qr-inline="qr-sub-box" data-qr-text="${esc(clientSubUrl)}">显示订阅二维码</button>
+        </div>
+        <div id="qr-sub-box" class="subscription-qr hidden">${subQrSvg}</div>
+      </div>
+
+      <div class="subscription-row">
+        <div>
+          <b>全节点聚合订阅地址 (包含面板所有已启用节点)</b>
+          <code>${esc(allSubUrl)}</code>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          <button data-copy="${esc(allSubUrl)}">复制全节点订阅</button>
+          <button data-copy="${esc(`${allSubUrl}?format=clash`)}">复制全节点 Clash</button>
+        </div>
+      </div>
     </div>
     `
   );
@@ -1548,58 +1704,58 @@ function openOutboundModal(existing = null) {
     '<option value="">直连发出 (不经过前置链式代理)</option>',
     ...state.outbounds
       .filter((o) => !o.builtin && o.id !== existing?.id)
-      .map((o) => `<option value="${esc(o.tag)}"${selected(o.tag, item.detour)}>前置代理: ${esc(o.remark)} (${esc(o.tag)})</option>`)
+      .map((o) => `<option value="${esc(o.tag)}"${selected(o.tag, item.detour)}>前置代理: ${esc(o.tag)} (${esc(o.remark)})</option>`)
   ].join('');
 
   openModal(
-    existing ? '编辑出站节点' : '新建中转 / 落地出站节点',
-    existing ? `${existing.remark} (${existing.tag})` : '配置中转落地机或外部出站协议',
+    existing ? '编辑出站规则' : '添加出站规则 (3x-ui 模式)',
+    existing ? `${existing.tag} (${existing.server}:${existing.port})` : '配置中转落地机或外部代理出站',
     `
     <form id="outbound-form" class="form-grid" data-id="${esc(existing?.id || '')}">
       <label>
-        出站备注名称
-        <input name="remark" value="${esc(item.remark)}" placeholder="如 日本落地机-SS2022" required>
+        出站标签 (Tag · 用于路由规则绑定，如 ace荷包蛋 / NTT 193)
+        <input name="tag" value="${esc(item.tag)}" placeholder="如 ace荷包蛋 或 US-node1" required>
       </label>
       <label>
-        出站唯一标识 (Tag)
-        <input name="tag" value="${esc(item.tag)}" placeholder="如 jp-exit-1 (留空自动生成)">
-      </label>
-
-      <label>
-        出站协议类型
+        出站协议 (Protocol)
         <select name="type">
           ${state.catalog.outboundProtocols.filter((p) => !['direct', 'block'].includes(p.id)).map((p) => `<option value="${esc(p.id)}"${selected(p.id, item.type)}>${esc(p.name)}</option>`).join('')}
         </select>
+      </label>
+
+      <label>
+        落地服务器地址 (IP 或域名)
+        <input name="server" value="${esc(item.server || '')}" placeholder="如 216.167.79.95" required>
+      </label>
+      <label>
+        落地服务器端口 (Port)
+        <input name="port" type="number" min="1" max="65535" value="${esc(item.port || 443)}" required>
+      </label>
+
+      <label>
+        备注说明 (可选)
+        <input name="remark" value="${esc(item.remark)}" placeholder="默认与标签 Tag 相同">
       </label>
       <label>
         前置链式代理 (Detour 多跳中转)
         <select name="detour">${detourOpts}</select>
       </label>
 
-      <label>
-        落地服务器地址 (IP 或域名)
-        <input name="server" value="${esc(item.server || '')}" placeholder="如 198.51.100.8">
-      </label>
-      <label>
-        落地服务器端口
-        <input name="port" type="number" min="1" max="65535" value="${esc(item.port || 443)}">
-      </label>
-
       <div class="section-title">凭据与加密参数 (按所选协议填写对应项)</div>
-      <label>
-        UUID (VLESS / VMess / TUIC)
-        <input name="uuid" value="${esc(item.uuid || '')}" placeholder="UUID">
-      </label>
       <label>
         密码 / 密钥 (SS / HY2 / AnyTLS / Trojan / SOCKS5)
         <input name="password" value="${esc(item.password || '')}" placeholder="连接密码或 Base64 密钥">
       </label>
-
       <label>
         Shadowsocks 加密方式
         <select name="method">
           ${state.catalog.ssMethods.map((m) => `<option value="${esc(m.id)}"${selected(m.id, item.method)}>${esc(m.label)}</option>`).join('')}
         </select>
+      </label>
+
+      <label>
+        UUID (VLESS / VMess / TUIC)
+        <input name="uuid" value="${esc(item.uuid || '')}" placeholder="标准 UUID">
       </label>
       <label>
         SOCKS5 / HTTP 用户名 (可选)
@@ -1610,7 +1766,7 @@ function openOutboundModal(existing = null) {
       <label>
         传输安全 (Security)
         <select name="security">
-          <option value="none"${selected('none', item.security)}>无 (None · SS/明文)</option>
+          <option value="none"${selected('none', item.security)}>无 (None · SS/SOCKS/明文)</option>
           <option value="tls"${selected('tls', item.security)}>TLS (AnyTLS / HY2 / Trojan / VLESS-TLS)</option>
           <option value="reality"${selected('reality', item.security)}>Reality (VLESS Reality 落地)</option>
         </select>
@@ -1642,7 +1798,7 @@ function openOutboundModal(existing = null) {
 
       <div class="form-actions">
         <button type="button" data-close>取消</button>
-        <button type="submit" class="primary">保存出站节点</button>
+        <button type="submit" class="primary">保存出站规则</button>
       </div>
     </form>
     `
@@ -1653,89 +1809,113 @@ function openRuleModal(existing = null) {
   const r = existing || {
     remark: '',
     inbound: [],
+    user: [],
     domain: [],
     domain_suffix: [],
     domain_keyword: [],
     ip_cidr: [],
     source_ip_cidr: [],
     port: [],
+    source_port: [],
     protocol: [],
     network: '',
     rule_set: [],
     ip_is_private: false,
-    outbound: 'direct'
+    outbound: state.outbounds.find((o) => !o.builtin)?.tag || 'direct'
   };
 
   const outboundOpts = state.outbounds
-    .map((o) => `<option value="${esc(o.tag)}"${selected(o.tag, r.outbound)}>${esc(o.remark)} (${esc(o.tag)})</option>`)
+    .map((o) => `<option value="${esc(o.tag)}"${selected(o.tag, r.outbound)}>${esc(o.tag)}${o.server ? ` (${o.server}:${o.port})` : ` (${o.remark})`}</option>`)
     .join('');
 
+  const inboundChecks = state.inbounds.map((i) => {
+    const isChecked = (r.inbound || []).includes(i.tag) ? 'checked' : '';
+    return `<label style="flex-direction:row;align-items:center;gap:6px;font-weight:500"><input type="checkbox" name="inbound_check" value="${esc(i.tag)}" style="width:15px;min-height:15px" ${isChecked}><span><code>${esc(i.tag)}</code> (${esc(i.remark)} :${i.port})</span></label>`;
+  }).join('');
+
   openModal(
-    existing ? '编辑分流规则' : '新建 3x-ui 风格分流规则',
-    existing ? r.remark : '配置域名、IP、协议或入站分流',
+    existing ? '编辑路由规则 (3x-ui 模式)' : '添加路由规则 (3x-ui 模式)',
+    existing ? (r.remark || `规则 -> ${r.outbound}`) : '配置入站转发映射或域名/IP分流规则',
     `
     <form id="rule-form" class="form-grid" data-id="${esc(existing?.id || '')}">
-      <label>
-        规则备注
-        <input name="remark" value="${esc(r.remark)}" placeholder="如 OpenAI 走日本落地机" required>
+      <label class="wide">
+        选择要转发的入站标签 (Inbound Tags · 可多选)
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--surface-soft);max-height:140px;overflow:auto">
+          ${inboundChecks || '<span class="muted">当前尚无入站节点，也可以在下方手动输入入站 Tag</span>'}
+        </div>
+        <input name="inbound" value="${esc((r.inbound || []).join(', '))}" placeholder="或手动输入入站标签，逗号分隔，如 inbound-48741, inbound-35807" style="margin-top:4px">
       </label>
+
       <label>
-        目标出站 (Outbound Tag)
+        目标出站标签 (Outbound Tag)
         <select name="outbound">${outboundOpts}</select>
       </label>
-
       <label>
-        指定入站 Tag (逗号分隔，留空匹配所有入站)
-        <input name="inbound" value="${esc((r.inbound || []).join(', '))}" placeholder="如 vless-443, hy2-8443">
-      </label>
-      <label>
-        规则集 (Sing-box SRS RuleSet，逗号分隔)
-        <input name="rule_set" value="${esc((r.rule_set || []).join(', '))}" placeholder="如 geosite-cn, geoip-cn, geosite-openai">
+        规则备注 (可选)
+        <input name="remark" value="${esc(r.remark)}" placeholder="留空自动按 入站 ➔ 出站 生成">
       </label>
 
+      <div class="section-title">高级匹配条件 (一对一中转无需填写以下项，留空即转发该入站全部流量)</div>
       <label>
-        域名 / Geosite 表达式 (兼容 3x-ui 格式，逗号分隔)
-        <input name="domain" value="${esc((r.domain || []).join(', '))}" placeholder="如 geosite:cn, domain:google.com, full:ip.sb">
+        来源 IP (Source IPs)
+        <input name="source_ip_cidr" value="${esc((r.source_ip_cidr || []).join(', '))}" placeholder="e.g. 0.0.0.0/8, fc00::/7">
       </label>
       <label>
-        域名后缀 (Domain Suffix，逗号分隔)
-        <input name="domain_suffix" value="${esc((r.domain_suffix || []).join(', '))}" placeholder="如 openai.com, netflix.com, cn">
+        来源端口 (Source Port)
+        <input name="source_port" value="${esc((r.source_port || []).join(', '))}" placeholder="e.g. 53,443,1000-2000">
       </label>
 
       <label>
-        IP CIDR / GeoIP (兼容 3x-ui 格式，逗号分隔)
-        <input name="ip_cidr" value="${esc((r.ip_cidr || []).join(', '))}" placeholder="如 geoip:cn, 1.1.1.0/24, 8.8.8.8/32">
-      </label>
-      <label>
-        目标端口或端口范围 (Port，逗号分隔)
-        <input name="port" value="${esc((r.port || []).join(', '))}" placeholder="如 53, 443, 1000-2000">
-      </label>
-
-      <label>
-        嗅探应用层协议 (逗号分隔)
-        <input name="protocol" value="${esc((r.protocol || []).join(', '))}" placeholder="如 bittorrent, quic, tls, http">
-      </label>
-      <label>
-        网络层类型 (Network)
+        网络 (Network L4)
         <select name="network">
           <option value=""${selected('', r.network)}>TCP + UDP (不限)</option>
-          <option value="tcp"${selected('tcp', r.network)}>仅 TCP</option>
-          <option value="udp"${selected('udp', r.network)}>仅 UDP</option>
+          <option value="tcp"${selected('tcp', r.network)}>TCP</option>
+          <option value="udp"${selected('udp', r.network)}>UDP</option>
         </select>
+      </label>
+      <label>
+        嗅探协议 (Protocol，逗号分隔)
+        <input name="protocol" value="${esc((r.protocol || []).join(', '))}" placeholder="http, tls, bittorrent, quic">
+      </label>
+
+      <label>
+        目标 IP (IP / GeoIP)
+        <input name="ip_cidr" value="${esc((r.ip_cidr || []).join(', '))}" placeholder="e.g. geoip:cn, 1.1.1.0/24">
+      </label>
+      <label>
+        目标域名 (Domain / Geosite)
+        <input name="domain" value="${esc((r.domain || []).join(', '))}" placeholder="e.g. google.com, geosite:cn, geosite:openai">
+      </label>
+
+      <label>
+        目标端口 (Port)
+        <input name="port" value="${esc((r.port || []).join(', '))}" placeholder="e.g. 53, 443, 1000-2000">
+      </label>
+      <label>
+        客户/用户 (User Email)
+        <input name="user" value="${esc((r.user || []).join(', '))}" placeholder="可选，按客户端标识匹配">
       </label>
 
       <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
         <input type="checkbox" name="ip_is_private" style="width:16px;min-height:16px" ${r.ip_is_private ? 'checked' : ''}>
-        <span>匹配私有内网 IP 地址 (ip_is_private / geoip:private)</span>
+        <span>匹配私有内网 IP 地址 (geoip:private / ip_is_private)</span>
       </label>
 
       <div class="form-actions">
         <button type="button" data-close>取消</button>
-        <button type="submit" class="primary">保存分流规则</button>
+        <button type="submit" class="primary">保存路由规则</button>
       </div>
     </form>
     `
   );
+
+  // Sync checkboxes with text input
+  $$('input[name="inbound_check"]', $('#rule-form')).forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const checkedVals = $$('input[name="inbound_check"]:checked', $('#rule-form')).map((x) => x.value);
+      $('input[name="inbound"]', $('#rule-form')).value = checkedVals.join(', ');
+    });
+  });
 }
 
 /* ==================== EVENT DELEGATION ==================== */
@@ -1757,18 +1937,21 @@ document.addEventListener('click', async (e) => {
   if (copyBtn) { copyText(copyBtn.dataset.copy, '链接/配置'); return; }
 
   const qrBtn = e.target.closest('[data-qr]');
-  if (qrBtn && window.NexusGateQR) {
+  if (qrBtn) {
     const text = qrBtn.dataset.qr;
-    openModal('订阅二维码', '使用客户端扫码导入', `<div class="subscription-qr">${window.NexusGateQR.svg(text)}<p class="muted" style="margin-top:10px;font-size:11px;word-break:break-all">${esc(text)}</p></div>`);
+    const svg = makeQrSvg(text);
+    openModal('客户端扫码导入', '使用 Shadowrocket / v2rayNG / NekoBox / Sing-box / Clash 扫码', `
+      <div class="subscription-qr">${svg || '<p class="muted">二维码生成中</p>'}<p class="muted" style="margin-top:10px;font-size:11px;word-break:break-all">${esc(text)}</p></div>
+    `);
     return;
   }
 
   const qrInlineBtn = e.target.closest('[data-qr-inline]');
-  if (qrInlineBtn && window.NexusGateQR) {
+  if (qrInlineBtn) {
     const box = $(`#${qrInlineBtn.dataset.qrInline}`);
     if (box) {
       box.classList.toggle('hidden');
-      if (!box.innerHTML) box.innerHTML = window.NexusGateQR.svg(qrInlineBtn.dataset.qrText);
+      if (!box.innerHTML.trim()) box.innerHTML = makeQrSvg(qrInlineBtn.dataset.qrText);
     }
     return;
   }
@@ -1779,6 +1962,7 @@ document.addEventListener('click', async (e) => {
 
   try {
     if (action === 'jump-migrate') { setPage('migrate'); }
+    else if (action === 'Switch-to-outbounds') { setPage('outbounds'); }
     else if (action === 'enable-bbr-hy2') {
       const res = await api('/api/system/acceleration', { method: 'POST', body: JSON.stringify({ mode: 'all' }) });
       toast(`🚀 已启用内核加速 (${res.acceleration?.congestion} + ${res.acceleration?.qdisc})`);
@@ -1805,7 +1989,7 @@ document.addEventListener('click', async (e) => {
     }
     else if (action === 'reset-inbound-traffic') {
       await api(`/api/inbounds/${actEl.dataset.id}/reset-traffic`, { method: 'POST' });
-      toast('节点流量统计已清零');
+      toast('入站节点流量已重置');
       load('inbounds');
     }
     else if (action === 'toggle-inbound') {
@@ -1822,6 +2006,15 @@ document.addEventListener('click', async (e) => {
     else if (action === 'inb-rand-port') {
       const input = $('#inb-port-input');
       if (input) input.value = Math.floor(Math.random() * 40000) + 15000;
+    }
+    else if (action === 'gen-uuid') {
+      const input = $('#inb-uuid-input');
+      if (input) input.value = genUuidClient();
+      toast('已生成新的标准 UUID');
+    }
+    else if (action === 'gen-clean-pass') {
+      const target = $(`#${actEl.dataset.target}`);
+      if (target) target.value = genRandomAlnum(20);
     }
     else if (action === 'gen-reality-keys') {
       const kp = await api('/api/tools/reality-keypair', { method: 'POST' });
@@ -1840,6 +2033,11 @@ document.addEventListener('click', async (e) => {
     else if (action === 'edit-outbound') {
       const out = state.outbounds.find((x) => x.id === actEl.dataset.id);
       if (out) openOutboundModal(out);
+    }
+    else if (action === 'reset-outbound-traffic') {
+      await api(`/api/outbounds/${actEl.dataset.id}/reset-traffic`, { method: 'POST' });
+      toast('出站流量统计已清零');
+      load('outbounds');
     }
     else if (action === 'ping-outbound') {
       const id = actEl.dataset.id;
@@ -1870,26 +2068,43 @@ document.addEventListener('click', async (e) => {
       load('outbounds');
     }
     else if (action === 'import-outbound-uri') {
-      openModal('一键导入外部节点作为中转出站', '粘贴节点分享链接 (URI)', `
+      openModal('批量导入外部节点作为中转出站', '支持一次粘贴单条或多条分享链接 (每行一条)', `
         <form id="import-uri-form" class="form-grid">
           <label class="wide">
-            节点分享链接 (支持 vless://, ss://, hysteria2://, hy2://, anytls://, trojan://, vmess://, socks5://, socks://, tuic://)
-            <textarea name="uri" placeholder="粘贴如 vless://... 或 ss://... 链接" required></textarea>
+            节点分享链接 (支持 ss://, socks://, socks5://, vless://, hysteria2://, hy2://, anytls://, trojan://, vmess://, tuic://)
+            <textarea name="uri" style="min-height:160px" placeholder="可一次粘贴多条节点链接（每行一条），将自动提取节点名称作为出站标签 Tag" required></textarea>
           </label>
-          <label>自定义出站备注 (可选)<input name="remark" placeholder="留空自动使用链接内名称"></label>
-          <label>自定义出站 Tag (可选)<input name="tag" placeholder="如 hk-relay-1"></label>
+          <label>自定义标签前缀 (可选，单条时为完整 Tag)<input name="tag" placeholder="留空自动使用链接内节点名"></label>
+          <label>自定义备注前缀 (可选)<input name="remark" placeholder="留空自动使用链接内节点名"></label>
           <div class="form-actions">
             <button type="button" data-close>取消</button>
-            <button type="submit" class="primary">解析并添加为出站节点</button>
+            <button type="submit" class="primary">解析并导入至出站列表</button>
           </div>
         </form>
       `);
     }
+    else if (action === 'quick-add-relay-rule') {
+      const inbTag = $('#quick-relay-inbound')?.value;
+      const outTag = $('#quick-relay-outbound')?.value;
+      if (!inbTag || !outTag) {
+        toast('请先选择入站标签与目标出站', true);
+        return;
+      }
+      await api('/api/routing/rules', {
+        method: 'POST',
+        body: JSON.stringify({
+          remark: `入站转发: ${inbTag} ➔ ${outTag}`,
+          inbound: [inbTag],
+          outbound: outTag
+        })
+      });
+      toast(`已添加转发规则: ${inbTag} ➔ ${outTag}`);
+      load('routing');
+    }
     else if (action === 'save-routing-global') {
       const finalOut = $('#routing-final-select')?.value || 'direct';
-      const dnsStrategy = $('#routing-dns-select')?.value || 'prefer_ipv4';
-      await api('/api/routing', { method: 'PUT', body: JSON.stringify({ final: finalOut, dnsStrategy }) });
-      toast('全局默认出站与 DNS 策略已保存');
+      await api('/api/routing', { method: 'PUT', body: JSON.stringify({ final: finalOut }) });
+      toast('默认兜底出站已保存');
       load('routing');
     }
     else if (action === 'add-rule') { openRuleModal(); }
@@ -1899,7 +2114,7 @@ document.addEventListener('click', async (e) => {
     }
     else if (action === 'delete-rule') {
       await api(`/api/routing/rules/${actEl.dataset.id}`, { method: 'DELETE' });
-      toast('分流规则已删除');
+      toast('路由规则已删除');
       load('routing');
     }
     else if (action === 'move-rule') {
@@ -2005,16 +2220,16 @@ document.addEventListener('click', async (e) => {
       }
     }
     else if (action === 'cert-selfsigned') {
-      openModal('一键生成 10 年自签 SSL 证书', '无域名即可用于面板 HTTPS 登录及 AnyTLS / HY2 / TUIC 节点', `
+      openModal('一键生成 10 年自签 SSL 证书', '仅在无域名时使用；若已有真实域名建议使用 ACME 申请', `
         <form id="cert-selfsigned-form" class="form-grid">
           <label class="wide">
-            伪装域名 (SNI / Common Name)
-            <input name="domain" value="${esc(state.settings.webDomain || 'www.bing.com')}" required>
-            <small>自动包含本机公网 IPv4 作为 SAN 扩展，生成后自动绑定至面板与所有 TLS 节点默认证书</small>
+            自签域名标识 (Common Name / SAN)
+            <input name="domain" value="${esc(state.settings.webDomain || 'www.apple.com')}" required>
+            <small>自动包含本机公网 IPv4 作为 SAN 扩展</small>
           </label>
           <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
             <input type="checkbox" name="applyToPanel" style="width:16px;min-height:16px" checked>
-            <span>同时绑定为面板 HTTPS 登录证书与节点默认证书 (推荐)</span>
+            <span>同时绑定为面板 HTTPS 登录证书与节点默认证书</span>
           </label>
           <div class="form-actions">
             <button type="button" data-close>取消</button>
@@ -2024,11 +2239,11 @@ document.addEventListener('click', async (e) => {
       `);
     }
     else if (action === 'cert-acme') {
-      openModal('ACME 自动申请受信任证书 (3x-ui 同款流程)', '签发后自动同步设为面板 HTTPS 与全部 TLS 节点默认证书', `
+      openModal('ACME 自动申请受信任证书 (3x-ui 同款流程)', '签发后自动替换自签证书，并设为面板 HTTPS 与全部 TLS 节点默认证书', `
         <form id="cert-acme-form" class="form-grid">
           <label>
             申请域名或公网 IP
-            <input name="domain" placeholder="如 node.example.com 或公网 IP" required>
+            <input name="domain" placeholder="如 cs.vponlive.com" required>
           </label>
           <label>
             通知邮箱 (可选)
@@ -2064,16 +2279,16 @@ document.addEventListener('click', async (e) => {
       openModal('导入或粘贴自定义 SSL 证书', '支持粘贴 PEM 内容或指定服务器已有证书路径 (如 /root/cert/...)', `
         <form id="cert-custom-form" class="form-grid">
           <label class="wide">
-            域名或证书标识名称
-            <input name="domain" placeholder="如 example.com" required>
+            域名标识名称
+            <input name="domain" placeholder="如 cs.vponlive.com" required>
           </label>
           <label>
             方式 A: 服务器已有公钥路径 (可选)
-            <input name="certPath" placeholder="/root/cert/fullchain.pem">
+            <input name="certPath" placeholder="/root/cert/cs.vponlive.com/fullchain.pem">
           </label>
           <label>
             方式 A: 服务器已有私钥路径 (可选)
-            <input name="keyPath" placeholder="/root/cert/privkey.pem">
+            <input name="keyPath" placeholder="/root/cert/cs.vponlive.com/privkey.pem">
           </label>
           <label class="wide">
             方式 B: 直接粘贴证书公钥内容 (fullchain.pem)
@@ -2108,15 +2323,20 @@ document.addEventListener('click', async (e) => {
       if (el) el.value = Math.floor(Math.random() * 45000) + 15000;
     }
     else if (action === 'random-path') {
-      const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-      let s = '';
-      for (let i = 0; i < 8; i += 1) s += chars[Math.floor(Math.random() * chars.length)];
       const el = $('#setting-webpath');
-      if (el) el.value = `/${s}/`;
+      if (el) el.value = `/${genRandomAlnum(16)}/`;
     }
     else if (action === 'reset-path') {
       const el = $('#setting-webpath');
       if (el) el.value = '/';
+    }
+    else if (action === 'random-account-user') {
+      const el = $('#account-user-input');
+      if (el) el.value = `ng_${genRandomAlnum(10)}`;
+    }
+    else if (action === 'random-account-pass') {
+      const el = $('#account-pass-input');
+      if (el) el.value = genRandomAlnum(18);
     }
     else if (action === 'restore-backup-modal') {
       openModal('导入恢复面板备份', '粘贴备份 JSON 内容', `
@@ -2150,9 +2370,12 @@ document.addEventListener('change', (e) => {
     if ($('#inb-key-path')) $('#inb-key-path').value = opt.dataset.key || '';
   }
   if (e.target.id === 'setting-cert-picker' && e.target.value) {
-    const [cPath, kPath] = e.target.value.split('|');
+    const [cPath, kPath, cDomain] = e.target.value.split('|');
     if ($('#setting-cert-file')) $('#setting-cert-file').value = cPath || '';
     if ($('#setting-key-file')) $('#setting-key-file').value = kPath || '';
+    if (cDomain && cDomain !== 'www.apple.com' && $('#setting-webdomain')) {
+      $('#setting-webdomain').value = cDomain;
+    }
   }
   if (e.target.id === 'xui-db-file' && e.target.files?.[0]) {
     const lbl = $('#xui-file-label');
@@ -2245,17 +2468,17 @@ document.addEventListener('submit', async (e) => {
       };
       if (id) {
         await api(`/api/outbounds/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
-        toast('出站节点已更新');
+        toast('出站规则已更新');
       } else {
         await api('/api/outbounds', { method: 'POST', body: JSON.stringify(payload) });
-        toast('出站节点已添加');
+        toast('出站规则已添加');
       }
       closeModal();
       load('outbounds');
     }
     else if (form.id === 'import-uri-form') {
-      await api('/api/outbounds/import-uri', { method: 'POST', body: JSON.stringify(data) });
-      toast('已成功解析分享链接并添加为出站节点');
+      const res = await api('/api/outbounds/import-uri', { method: 'POST', body: JSON.stringify(data) });
+      toast(`已成功解析并导入 ${res.count || 1} 个出站节点`);
       closeModal();
       load('outbounds');
     }
@@ -2267,10 +2490,10 @@ document.addEventListener('submit', async (e) => {
       };
       if (id) {
         await api(`/api/routing/rules/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
-        toast('分流规则已更新');
+        toast('路由规则已更新');
       } else {
         await api('/api/routing/rules', { method: 'POST', body: JSON.stringify(payload) });
-        toast('分流规则已添加');
+        toast('路由规则已添加');
       }
       closeModal();
       load('routing');
@@ -2290,7 +2513,7 @@ document.addEventListener('submit', async (e) => {
     else if (form.id === 'cert-acme-form') {
       toast('正在调用 ACME 申请证书，请稍候...');
       await api('/api/certificates/acme', { method: 'POST', body: JSON.stringify(data) });
-      toast('ACME 证书签发成功并已同步绑定至面板与节点！');
+      toast('ACME 证书签发成功并已同步绑定至面板与全部节点！');
       closeModal();
       load('certificates');
     }
