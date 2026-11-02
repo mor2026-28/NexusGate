@@ -1,0 +1,16 @@
+{
+  "name": "nexusgate-singbox",
+  "version": "2.0.0",
+  "private": true,
+  "description": "NexusGate Sing-box 轻量级全协议节点与中转分流管理面板 (融合 NexusGate UI 与 3x-ui 核心能力)",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/panel.test.js",
+    "check": "node --check server.js && node --check public/app.js && bash -n install.sh && bash -n nexusgate.sh"
+  },
+  "license": "MIT"
+}

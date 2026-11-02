@@ -1,0 +1,16 @@
+[Unit]
+Description=NexusGate Sing-box Lightweight Control Panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/nexusgate/nexusgate.env
+WorkingDirectory=/opt/nexusgate
+ExecStart=/usr/bin/node /opt/nexusgate/server.js
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
