@@ -37,6 +37,7 @@ const { KNOWN_VERSIONS, computeResetCycleKey, buildSingboxConfig, SingboxManager
 const {
   getSystemStatus,
   applyKernelAcceleration,
+  cleanupSystemLogsAndMemory,
   inspectCertificate,
   discoverSystemCertificates,
   issueSelfSignedCert,
@@ -48,7 +49,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '2.3.0';
+const VERSION = '2.4.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -215,31 +216,58 @@ function syncRoutingRulesToInbounds(st) {
   }
 }
 
+function getPanelInfoSummary() {
+  const s = store.state.settings;
+  const useHttps = Boolean(s.webCertFile && s.webKeyFile && fs.existsSync(s.webCertFile));
+  const proto = useHttps ? 'https' : 'http';
+  const host = s.webDomain || s.publicIPv4 || '127.0.0.1';
+  const base = normalizeBasePath(s.webBasePath);
+  const cleanUrl = `${proto}://${host}:${s.webPort}${base === '/' ? '/' : `${base}/`}`;
+  return {
+    version: VERSION,
+    username: store.state.admin.username,
+    listen: s.webListen,
+    port: s.webPort,
+    basePath: base,
+    strictBasePath: Boolean(s.strictBasePath),
+    https: useHttps,
+    webDomain: s.webDomain || '',
+    certFile: s.webCertFile || '未绑定 (HTTP)',
+    defaultNodeTlsDomain: s.defaultTlsDomain || s.webDomain || 'www.apple.com',
+    url: cleanUrl,
+    inboundsCount: store.state.inbounds.length,
+    outboundsCount: store.state.outbounds.filter((o) => !o.builtin).length,
+    rulesCount: (store.state.routing?.rules || []).filter((r) => r.action !== 'sniff').length
+  };
+}
+
 function handleCliCommand(args) {
   const cmd = args[0];
   if (cmd === '--show-info') {
-    const s = store.state.settings;
-    const useHttps = Boolean(s.webCertFile && s.webKeyFile && fs.existsSync(s.webCertFile));
-    const proto = useHttps ? 'https' : 'http';
-    const host = s.webDomain || s.publicIPv4 || '127.0.0.1';
-    const base = normalizeBasePath(s.webBasePath);
-    const cleanUrl = `${proto}://${host}:${s.webPort}${base === '/' ? '/' : `${base}/`}`;
-    console.log(JSON.stringify({
-      version: VERSION,
-      username: store.state.admin.username,
-      listen: s.webListen,
-      port: s.webPort,
-      basePath: base,
-      strictBasePath: Boolean(s.strictBasePath),
-      https: useHttps,
-      webDomain: s.webDomain || '',
-      certFile: s.webCertFile || '未绑定 (HTTP)',
-      defaultNodeTlsDomain: s.defaultTlsDomain || s.webDomain || 'www.apple.com',
-      url: cleanUrl,
-      inboundsCount: store.state.inbounds.length,
-      outboundsCount: store.state.outbounds.filter((o) => !o.builtin).length,
-      rulesCount: (store.state.routing?.rules || []).length
-    }, null, 2));
+    console.log(JSON.stringify(getPanelInfoSummary(), null, 2));
+    return;
+  }
+  if (cmd === '--show-info-pretty') {
+    const info = getPanelInfoSummary();
+    const g = '\x1b[32m';
+    const c = '\x1b[36m';
+    const y = '\x1b[33m';
+    const r = '\x1b[0m';
+    console.log(`${g}当前面板设置为：${r}`);
+    console.log(`  启用安全 (SSL) : ${c}${info.https}${r} ${info.https ? `(${info.certFile})` : ''}`);
+    console.log(`  用户名         : ${g}${info.username}${r}`);
+    console.log(`  面板端口       : ${y}${info.port}${r}`);
+    console.log(`  Web 根路径     : ${y}${info.basePath === '/' ? '/' : `${info.basePath}/`}${r} ${info.strictBasePath ? '(已开启防探测：单IP+端口返回404)' : ''}`);
+    console.log(`  默认节点域名   : ${g}${info.defaultNodeTlsDomain}${r}`);
+    console.log(`  节点与转发统计 : 入站 ${c}${info.inboundsCount}${r} 个 | 中转出站 ${c}${info.outboundsCount}${r} 个 | 路由规则 ${c}${info.rulesCount}${r} 条`);
+    console.log(`  访问 URL       : ${c}${info.url}${r}`);
+    console.log(`────────────────────────────────────────────────────────────────`);
+    console.log(`${y}⚠ 注意：如果您忘记了登录密码，可在 ng 菜单中选择 [6. 重置用户名、密码] 一键重置${r}`);
+    return;
+  }
+  if (cmd === '--cleanup-memory') {
+    const res = cleanupSystemLogsAndMemory(singbox, store);
+    console.log(`已完成日志清理与内存释放: ${res.actions.join(', ')}`);
     return;
   }
   if (cmd === '--set-account') {
@@ -432,8 +460,14 @@ function normalizeInboundPayload(body, existing = null) {
     } else if (!pub) {
       pub = deriveRealityPublicKey(priv);
     }
-    const serverName = String(rIn.serverName || 'www.tesla.com').trim();
-    const target = String(rIn.target || `${serverName}:443`).trim();
+    let serverName = String(rIn.serverName || 'www.apple.com').trim();
+    if (['www.cloudflare.com', 'cloudflare.com', 'www.bing.com'].includes(serverName.toLowerCase())) {
+      serverName = 'www.apple.com';
+    }
+    let target = String(rIn.target || `${serverName}:443`).trim();
+    if (/cloudflare\.com|bing\.com/i.test(target)) {
+      target = `${serverName}:443`;
+    }
     const shortIds = Array.isArray(rIn.shortIds)
       ? rIn.shortIds
       : String(rIn.shortIds || rIn.shortId || generateShortId())
@@ -728,6 +762,7 @@ async function handleRequest(req, res) {
 
     if (pathname === '/api/auth/login' && method === 'POST') {
       const ip = req.socket.remoteAddress || 'unknown';
+      if (loginAttempts.size > 500) loginAttempts.clear();
       const record = loginAttempts.get(ip) || { count: 0, resetAt: Date.now() + 600000 };
       if (Date.now() > record.resetAt) {
         record.count = 0;
@@ -818,6 +853,15 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, result);
     }
 
+    if (pathname === '/api/system/cleanup' && method === 'POST') {
+      const result = cleanupSystemLogsAndMemory(singbox, store);
+      store.transact(() => store.addAudit(session.username, 'cleanup_memory_logs', `清理日志与缓存 (${result.actions.join(', ')})`));
+      return sendJson(res, 200, {
+        result,
+        system: getSystemStatus(singbox, store.state.settings)
+      });
+    }
+
     if (pathname === '/api/catalog' && method === 'GET') {
       return sendJson(res, 200, {
         inboundProtocols: INBOUND_PROTOCOLS,
@@ -844,7 +888,7 @@ async function handleRequest(req, res) {
       });
     }
 
-    // 8. Inbounds CRUD
+    // 8. Inbounds CRUD + Batch Operations
     if (pathname === '/api/inbounds' && method === 'GET') {
       syncDiscoveredCerts();
       const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
@@ -859,6 +903,39 @@ async function handleRequest(req, res) {
           defaultKeyFile: realCert?.keyPath || store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || ''
         }
       });
+    }
+
+    if (pathname === '/api/inbounds/batch' && method === 'POST') {
+      const body = await readJson(req);
+      const act = String(body.action || '');
+      const ids = Array.isArray(body.ids) ? new Set(body.ids) : null;
+      let count = 0;
+
+      store.transact((st) => {
+        for (const inb of st.inbounds || []) {
+          if (ids && !ids.has(inb.id)) continue;
+          if (act === 'enable-all' || act === 'enable-ids') {
+            inb.enable = true;
+            delete inb.disabledReason;
+            count += 1;
+          } else if (act === 'disable-all' || act === 'disable-ids') {
+            inb.enable = false;
+            count += 1;
+          } else if (act === 'reset-all-traffic' || act === 'reset-ids-traffic') {
+            inb.up = 0;
+            inb.down = 0;
+            for (const c of inb.clients || []) { c.up = 0; c.down = 0; }
+            if (inb.enable === false && inb.disabledReason === 'quota') {
+              inb.enable = true;
+              delete inb.disabledReason;
+            }
+            count += 1;
+          }
+        }
+        store.addAudit(session.username, 'batch_inbounds', `${act} (${count} 个节点)`);
+      });
+      autoApplyIfEnabled();
+      return sendJson(res, 200, { ok: true, count });
     }
 
     if (pathname === '/api/inbounds' && method === 'POST') {
@@ -1102,7 +1179,6 @@ async function handleRequest(req, res) {
         outbound: String(body.outbound || 'direct').trim()
       };
       store.transact((st) => {
-        // Deduplicate if this is a pure 1-to-1 inbound relay rule
         const isPureInboundRelay =
           newRule.inbound.length === 1 &&
           !newRule.domain.length &&
@@ -1203,7 +1279,6 @@ async function handleRequest(req, res) {
       const targetOutbound = body.outbound || 'direct';
       store.transact((st) => {
         if (preset === '3xui-default') {
-          // Keep sniff and pure 1-to-1 inbound relay rules, reset others to clean 3x-ui defaults (geoip:private + bittorrent block)
           const relayRules = (st.routing.rules || []).filter(
             (r) => Array.isArray(r.inbound) && r.inbound.length > 0 && !r.domain?.length && !r.ip_cidr?.length
           );
@@ -1685,8 +1760,22 @@ function restartPanelServer() {
 
 if (require.main === module) {
   startPanelServer();
-  setInterval(() => sessions.prune(), 600000).unref();
+  setInterval(() => {
+    sessions.prune();
+    const now = Date.now();
+    for (const [ip, rec] of loginAttempts.entries()) {
+      if (now > rec.resetAt) loginAttempts.delete(ip);
+    }
+    store.flushIfDirty();
+  }, 60000).unref();
   setInterval(() => singbox.pollConnectionsAndEnforceLimits().catch(() => {}), 5000).unref();
+
+  const gracefulShutdown = () => {
+    try { store.flushIfDirty(); } catch { /* ignore */ }
+    process.exit(0);
+  };
+  process.on('SIGINT', gracefulShutdown);
+  process.on('SIGTERM', gracefulShutdown);
 }
 
 module.exports = {

@@ -7,10 +7,11 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=-/etc/nexusgate/nexusgate.env
 WorkingDirectory=/opt/nexusgate
-ExecStart=/usr/bin/node /opt/nexusgate/server.js
+ExecStart=/usr/bin/node --expose-gc --max-old-space-size=128 /opt/nexusgate/server.js
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
+MemoryMax=180M
 
 [Install]
 WantedBy=multi-user.target

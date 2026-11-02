@@ -35,7 +35,7 @@ pause_return() {
 }
 
 panel_status_text() {
-  if systemctl is-active --quiet nexusgate.service 2>/dev/null || pgrep -f "node $INSTALL_DIR/server.js" >/dev/null 2>&1; then
+  if systemctl is-active --quiet nexusgate.service 2>/dev/null || pgrep -f "node.*$INSTALL_DIR/server.js" >/dev/null 2>&1; then
     echo -e "${green}运行中${plain}"
   else
     echo -e "${red}已停止${plain}"
@@ -74,9 +74,27 @@ bbr_status_text() {
 }
 
 show_info() {
-  echo -e "${cyan}==================== 当前面板配置与访问地址 ====================${plain}"
-  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --show-info
-  echo -e "${cyan}================================================================${plain}"
+  echo -e "${cyan}==================== 当前面板配置与访问地址 (3x-ui 风格) ====================${plain}"
+  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --show-info-pretty
+  echo -e "${cyan}=============================================================================${plain}"
+}
+
+cleanup_memory_and_logs() {
+  need_root
+  info "正在清理系统日志、临时文件并释放内存..."
+  mkdir -p /etc/systemd/journald.conf.d
+  cat > /etc/systemd/journald.conf.d/99-nexusgate.conf <<'EOF'
+[Journal]
+SystemMaxUse=64M
+SystemMaxFileSize=16M
+RuntimeMaxUse=32M
+MaxRetentionSec=7day
+EOF
+  systemctl restart systemd-journald 2>/dev/null || true
+  journalctl --vacuum-size=32M >/dev/null 2>&1 || true
+  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --cleanup-memory || true
+  sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+  ok "系统日志已收缩至 32MB 以内，临时缓存与可回收内存已释放！"
 }
 
 change_account() {
@@ -488,15 +506,31 @@ update_panel() {
   systemctl stop nexusgate.service 2>/dev/null || true
   mkdir -p "$INSTALL_DIR"
   tar -xzf "$tmp/src.tar.gz" -C "$INSTALL_DIR" --strip-components=1
+  install -m 0644 "$INSTALL_DIR/systemd/nexusgate.service" /etc/systemd/system/nexusgate.service
+  install -m 0644 "$INSTALL_DIR/systemd/nexusgate-singbox.service" /etc/systemd/system/nexusgate-singbox.service
   install -m 0755 "$INSTALL_DIR/nexusgate.sh" /usr/local/bin/nexusgate
   ln -sf /usr/local/bin/nexusgate /usr/local/bin/ng
   rm -rf -- "$tmp" /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
+
+  # Cap journald logs to 64M so 1C-1G-10G servers never run out of disk space
+  mkdir -p /etc/systemd/journald.conf.d
+  cat > /etc/systemd/journald.conf.d/99-nexusgate.conf <<'EOF'
+[Journal]
+SystemMaxUse=64M
+SystemMaxFileSize=16M
+RuntimeMaxUse=32M
+MaxRetentionSec=7day
+EOF
+  systemctl restart systemd-journald 2>/dev/null || true
+  journalctl --vacuum-size=32M >/dev/null 2>&1 || true
+  systemctl daemon-reload 2>/dev/null || true
+
   # Trigger cert discovery, Reality config fix, and firewall port opening before restarting
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --issue-selfsigned >/dev/null 2>&1 || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
-  ok "NexusGate 面板与管理脚本已更新至 v2.3，所有节点与 Sing-box 内核已重新加载生效！"
+  ok "NexusGate 面板与管理脚本已更新至 v2.4，所有节点与 Sing-box 内核已重新加载生效！"
   show_info
 }
 
@@ -517,8 +551,8 @@ show_menu() {
   clear 2>/dev/null || true
   echo -e "
   ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
-  ${cyan}║${plain}     ${green}NexusGate · 枢门 Sing-box 轻量中转面板管理脚本 (v2.3)${plain}      ${cyan}║${plain}
-  ${cyan}║${plain}     ${yellow}3x-ui 全功能命令体验 · BBR+FQ+HY2 加速 · ACME 证书联动${plain}     ${cyan}║${plain}
+  ${cyan}║${plain}     ${green}NexusGate · 枢门 Sing-box 轻量中转面板管理脚本 (v2.4)${plain}      ${cyan}║${plain}
+  ${cyan}║${plain}     ${yellow}3x-ui 全功能命令体验 · 1C1G10G 防爆满优化 · ACME 证书联动${plain}  ${cyan}║${plain}
   ${cyan}╚════════════════════════════════════════════════════════════════╝${plain}
   ${green}0.${plain} 退出脚本
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -532,7 +566,7 @@ show_menu() {
   ${green}7.${plain} 修改访问路径 (默认生成16位随机安全路径)
   ${green}8.${plain} 重置面板设置 (恢复默认端口与路径)
   ${green}9.${plain} 修改面板端口
-  ${green}10.${plain} 查看当前面板设置 (完整登录链接/账号/端口)
+  ${green}10.${plain} 查看当前面板设置 (3x-ui 风格清晰展示完整登录链接/账号/端口)
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ${green}11.${plain} 启动面板与 Sing-box
   ${green}12.${plain} 关闭面板与 Sing-box
@@ -552,6 +586,7 @@ show_menu() {
   ${green}23.${plain} 更新 Geo 分流规则文件
   ${green}24.${plain} Speedtest 测速工具
   ${green}25.${plain} 一键无损迁移 3x-ui 全部节点与中转 (x-ui.db / 备份包)
+  ${green}26.${plain} 一键清理系统日志与释放内存 (专为 1C-1G-10G 中转机防爆满优化)
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   面板状态: $(panel_status_text)
   开机启动: $(autostart_status_text)
@@ -559,7 +594,7 @@ show_menu() {
   网络加速: $(bbr_status_text)
 "
   local choice=""
-  read -r -p "请输入选项 [0-25]: " choice </dev/tty || exit 0
+  read -r -p "请输入选项 [0-26]: " choice </dev/tty || exit 0
   case "$choice" in
     0) exit 0 ;;
     1) bash "$INSTALL_DIR/install.sh" ;;
@@ -587,7 +622,8 @@ show_menu() {
     23) update_geo_files ; pause_return ;;
     24) run_speedtest ; pause_return ;;
     25) migrate_3xui ; pause_return ;;
-    *) warn "请输入有效数字 [0-25]" ; sleep 1 ;;
+    26) cleanup_memory_and_logs ; pause_return ;;
+    *) warn "请输入有效数字 [0-26]" ; sleep 1 ;;
   esac
 }
 
@@ -598,6 +634,7 @@ if [[ $# -gt 0 ]]; then
     restart) systemctl restart nexusgate.service nexusgate-singbox.service ;;
     status) systemctl status nexusgate.service nexusgate-singbox.service --no-pager ;;
     info|settings) show_info ;;
+    clean|cleanup) cleanup_memory_and_logs ;;
     log|logs) journalctl -u nexusgate.service -u nexusgate-singbox.service -n 100 --no-pager ;;
     bbr) bbr_menu ;;
     cert|ssl) ssl_cert_menu ;;

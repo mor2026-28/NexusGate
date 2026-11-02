@@ -110,9 +110,9 @@ download_panel_source() {
 }
 
 enable_bbr_and_hy2_tuning() {
-  info "正在优化内核网络参数 (启用 BBR + FQ 队列与 Hysteria 2 64MB UDP 高速缓冲区)..."
+  info "正在优化内核网络参数与系统日志限额 (启用 BBR + FQ + HY2 64MB 缓冲 + Journald 64MB 防爆盘保护)..."
   modprobe tcp_bbr 2>/dev/null || true
-  mkdir -p /etc/sysctl.d
+  mkdir -p /etc/sysctl.d /etc/systemd/journald.conf.d
   cat > /etc/sysctl.d/99-nexusgate-acceleration.conf <<'EOF'
 # NexusGate Sing-box BBR + FQ + HY2 Kernel Tuning
 fs.file-max = 2097152
@@ -131,6 +131,16 @@ net.core.rmem_default = 2097152
 net.core.wmem_default = 2097152
 EOF
   sysctl --system >/dev/null 2>&1 || true
+
+  cat > /etc/systemd/journald.conf.d/99-nexusgate.conf <<'EOF'
+[Journal]
+SystemMaxUse=64M
+SystemMaxFileSize=16M
+RuntimeMaxUse=32M
+MaxRetentionSec=7day
+EOF
+  systemctl restart systemd-journald 2>/dev/null || true
+  journalctl --vacuum-size=32M >/dev/null 2>&1 || true
 }
 
 configure_panel() {
@@ -230,8 +240,8 @@ PY
     systemctl enable --now nexusgate-singbox.service || true
     systemctl restart nexusgate-singbox.service || true
   else
-    pkill -f "node $INSTALL_DIR/server.js" 2>/dev/null || true
-    nohup env NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" >/var/log/nexusgate.log 2>&1 &
+    pkill -f "node.*$INSTALL_DIR/server.js" 2>/dev/null || true
+    nohup env NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node --expose-gc --max-old-space-size=128 "$INSTALL_DIR/server.js" >/var/log/nexusgate.log 2>&1 &
   fi
 
   local info_json login_url cert_domain
@@ -241,7 +251,7 @@ PY
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.3 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.4 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
   echo -e " 面板访问地址 : ${cyan}${login_url}${plain}"
   echo -e " 面板端口     : ${yellow}${panel_port}${plain}"
@@ -249,8 +259,9 @@ PY
   echo -e " 管理员账号   : ${green}${admin_user}${plain}"
   echo -e " 管理员密码   : ${green}${admin_pass}${plain}"
   echo -e " 默认证书域名 : ${green}${cert_domain}${plain}"
+  echo -e " 内存/硬盘保护: ${green}已启用 V8 128MB 内存限制 + Journald 64MB 自动轮转${plain}"
   echo -e " 内核加速状态 : ${green}已开启 BBR + FQ + HY2 64MB UDP 缓冲优化${plain}"
-  echo -e " SSH 管理命令 : 输入 ${cyan}ng${plain} 或 ${cyan}nexusgate${plain} 呼出 0-25 完整管理菜单 (同 3x-ui)"
+  echo -e " SSH 管理命令 : 输入 ${cyan}ng${plain} 或 ${cyan}nexusgate${plain} 呼出 0-26 完整管理菜单 (同 3x-ui)"
   echo -e "${green}==================================================================${plain}"
 }
 
