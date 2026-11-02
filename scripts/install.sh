@@ -110,7 +110,7 @@ download_panel_source() {
 }
 
 enable_bbr_and_hy2_tuning() {
-  info "正在优化内核网络参数与系统日志限额 (启用 BBR + FQ + HY2 64MB 缓冲 + Journald 64MB 防爆盘保护)..."
+  info "正在优化内核网络参数与系统日志限额 (启用 BBR + FQ + HY2 64MB 缓冲 + Journald 64MB 自动轮转)..."
   modprobe tcp_bbr 2>/dev/null || true
   mkdir -p /etc/sysctl.d /etc/systemd/journald.conf.d
   cat > /etc/sysctl.d/99-nexusgate-acceleration.conf <<'EOF'
@@ -162,7 +162,7 @@ configure_panel() {
 
   if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
     echo ""
-    echo -e "${cyan}=== NexusGate Sing-box 面板初始化安全配置 (直接回车使用高强度随机值，同 3x-ui) ===${plain}"
+    echo -e "${cyan}=== NexusGate Sing-box 面板初始化安全配置 (直接回车使用高强度随机值) ===${plain}"
     read -r -p "请输入面板端口 [默认随机: ${default_port}]: " input_port </dev/tty || true
     [[ -n "${input_port:-}" ]] && panel_port="${input_port//[^0-9]/}"
 
@@ -204,10 +204,8 @@ json.dump(d, open(p, "w"))
 PY
   fi
 
-  # Auto-detect existing ACME domain cert first; if none exists, generate 10-year self-signed cert
   NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --issue-selfsigned "www.apple.com" "$pub_ip" >/dev/null
 
-  # Auto-detect existing 3x-ui database or backup archive
   if [[ -f /etc/x-ui/x-ui.db || -f /root/3xui_backup.tar.gz ]]; then
     local found_xui="/etc/x-ui/x-ui.db"
     [[ ! -f "$found_xui" && -f /root/3xui_backup.tar.gz ]] && found_xui="/root/3xui_backup.tar.gz"
@@ -221,10 +219,8 @@ PY
     fi
   fi
 
-  # Open firewall ports automatically across ufw / firewalld / iptables
   NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
 
-  # Setup systemd services & CLI symlinks
   install -m 0644 "$INSTALL_DIR/systemd/nexusgate.service" /etc/systemd/system/nexusgate.service
   install -m 0644 "$INSTALL_DIR/systemd/nexusgate-singbox.service" /etc/systemd/system/nexusgate-singbox.service
   install -m 0755 "$INSTALL_DIR/nexusgate.sh" /usr/local/bin/nexusgate
@@ -245,23 +241,22 @@ PY
   fi
 
   local info_json login_url cert_domain
-  info_json="$(NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --show-info)"
+  info_json="$(NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --show-info-json)"
   login_url="$(echo "$info_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("url",""))' 2>/dev/null || echo "")"
   cert_domain="$(echo "$info_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("defaultNodeTlsDomain",""))' 2>/dev/null || echo "")"
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.4 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.5 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
-  echo -e " 面板访问地址 : ${cyan}${login_url}${plain}"
-  echo -e " 面板端口     : ${yellow}${panel_port}${plain}"
-  echo -e " 安全根路径   : ${yellow}${base_path}${plain} (已启用安全模式：单 IP+端口 禁止直接访问)"
-  echo -e " 管理员账号   : ${green}${admin_user}${plain}"
-  echo -e " 管理员密码   : ${green}${admin_pass}${plain}"
-  echo -e " 默认证书域名 : ${green}${cert_domain}${plain}"
-  echo -e " 内存/硬盘保护: ${green}已启用 V8 128MB 内存限制 + Journald 64MB 自动轮转${plain}"
-  echo -e " 内核加速状态 : ${green}已开启 BBR + FQ + HY2 64MB UDP 缓冲优化${plain}"
-  echo -e " SSH 管理命令 : 输入 ${cyan}ng${plain} 或 ${cyan}nexusgate${plain} 呼出 0-26 完整管理菜单 (同 3x-ui)"
+  echo -e " 访问地址   : ${cyan}${login_url}${plain}"
+  echo -e " 登录账号   : ${green}${admin_user}${plain}"
+  echo -e " 登录密码   : ${green}${admin_pass}${plain}"
+  echo -e " 面板端口   : ${yellow}${panel_port}${plain}"
+  echo -e " 安全路径   : ${yellow}${base_path}${plain}"
+  echo -e " 证书域名   : ${green}${cert_domain}${plain}"
+  echo -e " 内核加速   : ${green}已开启 BBR + FQ + HY2 64MB UDP 缓冲优化${plain}"
+  echo -e " SSH 命令   : 输入 ${cyan}ng${plain} 或 ${cyan}nexusgate${plain} 呼出管理菜单"
   echo -e "${green}==================================================================${plain}"
 }
 

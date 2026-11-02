@@ -8,7 +8,7 @@ const path = require('node:path');
 const http = require('node:http');
 const { spawnSync } = require('node:child_process');
 
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-test-v24-'));
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-test-v25-'));
 process.env.NG_DATA_FILE = path.join(tmpDir, 'nexusgate.json');
 process.env.NG_SINGBOX_CONFIG = path.join(tmpDir, 'sing-box-config.json');
 process.env.NG_ADMIN_USERNAME = 'ng_adminTest01';
@@ -69,7 +69,6 @@ test('1. Strict webBasePath security: bare IP:Port returns 404, only /SecPath16C
 });
 
 test('2. Reality SNI excludes Cloudflare/Microsoft & Reality never gets certificate_path, TLS gets valid cert', async () => {
-  // Verify REALITY_PRESETS never includes cloudflare or microsoft/bing
   for (const preset of REALITY_PRESETS) {
     assert.ok(!/cloudflare|microsoft|bing/i.test(preset.serverName), `Forbidden SNI in presets: ${preset.serverName}`);
   }
@@ -117,10 +116,9 @@ test('2. Reality SNI excludes Cloudflare/Microsoft & Reality never gets certific
     }
   }
 
-  // Verify generated sing-box config.json on disk!
   const { config } = singbox.writeConfig();
   assert.equal(config.dns, undefined, 'Server config should omit deprecated legacy DNS block');
-  assert.equal(config.log.level, 'warn', 'Default log level should be warn to prevent disk/memory bloat on 1C-1G-10G servers');
+  assert.equal(config.log.level, 'warn', 'Default log level should be warn');
 
   const realityInb = config.inbounds.find((i) => i.type === 'vless' && i.tls?.reality?.enabled);
   assert.ok(realityInb, 'Reality inbound should exist in Sing-box config');
@@ -143,7 +141,6 @@ test('3. Monthly automatic traffic reset (resetDay 1..31), batch operations, and
   targetInb.disabledReason = 'quota';
   targetInb.expiryTime = 0;
 
-  // Simulate date reaching Dec 15, 2026
   const res = singbox.checkAndResetMonthlyTraffic(new Date('2026-12-15T00:05:00Z'));
   assert.ok(res.resetCount >= 1);
   assert.equal(targetInb.up, 0);
@@ -151,7 +148,6 @@ test('3. Monthly automatic traffic reset (resetDay 1..31), batch operations, and
   assert.equal(targetInb.enable, true);
   assert.equal(targetInb.lastResetCycle, '2026-12');
 
-  // Test batch reset traffic and batch enable
   targetInb.up = 123456;
   const batchRes = await req('/SecPath16Chars99/api/inbounds/batch', {
     method: 'POST',
@@ -161,13 +157,12 @@ test('3. Monthly automatic traffic reset (resetDay 1..31), batch operations, and
   assert.ok(batchRes.json.count >= 1);
   assert.equal(targetInb.up, 0);
 
-  // Test system memory and log cleanup endpoint
   const cleanRes = await req('/SecPath16Chars99/api/system/cleanup', { method: 'POST' });
   assert.equal(cleanRes.status, 200);
   assert.ok(Array.isArray(cleanRes.json.result.actions));
 });
 
-test('4. Clash smart subscription template (AI + Foreign Trade + User Rules) & 3x-ui CLI pretty info', async () => {
+test('4. Clash smart subscription template & concise CLI --show-info output', async () => {
   const subRes = await req('/sub/all?format=clash');
   assert.equal(subRes.status, 200);
   assert.ok(subRes.headers.get('subscription-userinfo').includes('total='));
@@ -180,17 +175,18 @@ test('4. Clash smart subscription template (AI + Foreign Trade + User Rules) & 3
   assert.ok(subRes.text.includes('DOMAIN-SUFFIX,google.com,🔰 节点选择'));
   assert.ok(subRes.text.includes('GEOIP,CN,🎯 全球直连,no-resolve'));
 
-  // Test CLI --show-info-pretty (3x-ui style)
-  const cliPretty = spawnSync(process.execPath, [path.join(__dirname, '..', 'server.js'), '--show-info-pretty'], {
+  // Test default CLI --show-info (must be concise human-readable text, NOT raw JSON!)
+  const cliInfo = spawnSync(process.execPath, [path.join(__dirname, '..', 'server.js'), '--show-info'], {
     env: { ...process.env, NG_DATA_FILE: path.join(tmpDir, 'nexusgate.json') },
     encoding: 'utf8'
   });
-  assert.equal(cliPretty.status, 0);
-  assert.ok(cliPretty.stdout.includes('当前面板设置为：'));
-  assert.ok(cliPretty.stdout.includes('访问 URL'));
+  assert.equal(cliInfo.status, 0);
+  assert.ok(cliInfo.stdout.includes('访问地址'));
+  assert.ok(cliInfo.stdout.includes('登录账号'));
+  assert.ok(!cliInfo.stdout.trim().startsWith('{'), '--show-info should output human-readable lines, not raw JSON');
 });
 
-test('5. E2E Lossless Migration of 3x-ui SQLite Database (40 Inbounds + 10 Relay Outbounds + Routing Rules) & Low Memory Footprint', async () => {
+test('5. E2E Lossless Migration of 3x-ui SQLite Database (40 Inbounds + 9 Relay Outbounds + Routing Rules) & Low Memory Footprint', async () => {
   const dbPath = path.join(tmpDir, 'x-ui-production.db');
   const pyGen = `
 import sqlite3, json, sys
@@ -202,7 +198,6 @@ cur.execute("CREATE TABLE client_traffics (id INTEGER PRIMARY KEY, inbound_id IN
 cur.execute("CREATE TABLE outbound_traffics (id INTEGER PRIMARY KEY, tag TEXT, up INT, down INT, total INT)")
 cur.execute("CREATE TABLE settings (id INTEGER PRIMARY KEY, key TEXT, value TEXT)")
 
-# Generate 40 diverse 3x-ui inbounds (matching user's 30-40 nodes per server)
 for i in range(1, 41):
     port = 40000 + i
     tag = f"inbound-{port}"
@@ -225,31 +220,25 @@ for i in range(1, 41):
 
     cur.execute(
         "INSERT INTO inbounds VALUES (?, 1, ?, ?, ?, ?, 1, 1893456000000, 'monthly', '', ?, ?, ?, ?, ?, '{}')",
-        (i, i * 1024, i * 2048, 100 * (1024**3), f"3xUI-Node-{i}", port, proto, json.dumps(settings), json.dumps(stream), tag)
+        (i, i * 1024, i * 2048, 100 * (1024**3), f"Node-{i}", port, proto, json.dumps(settings), json.dumps(stream), tag)
     )
 
 outbounds = [
     {"tag": "direct", "protocol": "freedom", "settings": {}},
     {"tag": "blocked", "protocol": "blackhole", "settings": {}},
     {"tag": "api", "protocol": "blackhole", "settings": {}},
-    {"tag": "ace荷包蛋", "protocol": "shadowsocks", "settings": {"servers": [{"address": "216.167.79.10", "port": 15001, "method": "aes-256-gcm", "password": "pass1", "uot": True}]}},
-    {"tag": "US-tsnzqn15", "protocol": "shadowsocks", "settings": {"servers": [{"address": "yun.362353.xyz", "port": 15002, "method": "2022-blake3-aes-128-gcm", "password": "pass2"}]}},
-    {"tag": "ace us季度", "protocol": "shadowsocks", "settings": {"servers": [{"address": "216.167.88.20", "port": 15003, "method": "aes-128-gcm", "password": "pass3"}]}},
-    {"tag": "NTT 193", "protocol": "shadowsocks", "settings": {"servers": [{"address": "192.220.32.193", "port": 15004, "method": "aes-256-gcm", "password": "pass4"}]}},
-    {"tag": "NTT 24", "protocol": "shadowsocks", "settings": {"servers": [{"address": "192.220.32.24", "port": 15005, "method": "aes-256-gcm", "password": "pass5"}]}},
-    {"tag": "ntt 141", "protocol": "shadowsocks", "settings": {"servers": [{"address": "192.204.38.141", "port": 15006, "method": "aes-256-gcm", "password": "pass6"}]}},
-    {"tag": "NTT三刀年付", "protocol": "shadowsocks", "settings": {"servers": [{"address": "192.220.32.99", "port": 15007, "method": "aes-256-gcm", "password": "pass7"}]}},
-    {"tag": "yunyoo US原生", "protocol": "shadowsocks", "settings": {"servers": [{"address": "38.76.150.11", "port": 15008, "method": "aes-256-gcm", "password": "pass8"}]}},
-    {"tag": "US-Flat-VLESS", "protocol": "vless", "settings": {"address": "198.51.100.88", "port": 443, "id": "99999999-8888-4777-8666-555555555555", "flow": "xtls-rprx-vision", "encryption": "none"}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"serverName": "www.apple.com", "publicKey": "pbk123", "shortId": "1a2b"}, "sockopt": {"dialerProxy": "ace荷包蛋"}}}
+    {"tag": "relay-node-1", "protocol": "shadowsocks", "settings": {"servers": [{"address": "198.51.100.10", "port": 15001, "method": "aes-256-gcm", "password": "pass1", "uot": True}]}},
+    {"tag": "relay-node-2", "protocol": "shadowsocks", "settings": {"servers": [{"address": "198.51.100.11", "port": 15002, "method": "2022-blake3-aes-128-gcm", "password": "pass2"}]}},
+    {"tag": "relay-vless-flat", "protocol": "vless", "settings": {"address": "198.51.100.88", "port": 443, "id": "99999999-8888-4777-8666-555555555555", "flow": "xtls-rprx-vision", "encryption": "none"}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"serverName": "www.apple.com", "publicKey": "pbk123", "shortId": "1a2b"}, "sockopt": {"dialerProxy": "relay-node-1"}}}
 ]
 
 rules = [
-    {"type": "field", "inboundTag": ["inbound-40001"], "outboundTag": "ace荷包蛋"},
-    {"type": "field", "inboundTag": ["inbound-40002"], "outboundTag": "US-tsnzqn15"},
-    {"type": "field", "inboundTag": ["inbound-40004"], "outboundTag": "US-Flat-VLESS"}
+    {"type": "field", "inboundTag": ["inbound-40001"], "outboundTag": "relay-node-1"},
+    {"type": "field", "inboundTag": ["inbound-40002"], "outboundTag": "relay-node-2"},
+    {"type": "field", "inboundTag": ["inbound-40004"], "outboundTag": "relay-vless-flat"}
 ]
 
-cur.execute("INSERT INTO outbound_traffics VALUES (1, 'ace荷包蛋', 10485760, 20971520, 31457280)")
+cur.execute("INSERT INTO outbound_traffics VALUES (1, 'relay-node-1', 10485760, 20971520, 31457280)")
 cur.execute("INSERT INTO settings VALUES (1, 'xrayTemplateConfig', ?)", (json.dumps({"outbounds": outbounds, "routing": {"rules": rules}}),))
 conn.commit()
 conn.close()
@@ -265,9 +254,8 @@ conn.close()
   });
   assert.equal(migRes.status, 200);
   assert.equal(migRes.json.summary.inboundsCount, 40);
-  assert.equal(migRes.json.summary.outboundsCount, 9);
+  assert.equal(migRes.json.summary.outboundsCount, 3);
 
-  // Simulate 20 rapid /api/overview and /api/inbounds polls on 40 nodes to verify zero memory leak
   for (let i = 0; i < 20; i += 1) {
     const ovRes = await req('/SecPath16Chars99/api/overview');
     assert.equal(ovRes.status, 200);

@@ -49,7 +49,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '2.4.0';
+const VERSION = '2.5.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -66,7 +66,6 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
   st.certificates = (st.certificates || []).filter((c) => {
     if (c.domain === 'www.bing.com') return false;
     if (c.domain === cert.domain || c.certPath === cert.certPath) return false;
-    // Once a real ACME certificate is bound, remove leftover fallback self-signed certs so only real certs remain
     if (isRealAcme && (c.type === 'self-signed' || c.isSelfSigned)) return false;
     return true;
   });
@@ -99,10 +98,6 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
   }
 }
 
-/**
- * Discovers system certificates (/root/cert/* and /etc/nexusgate/certs/*)
- * and automatically promotes any real ACME domain certificate over self-signed certificates!
- */
 function syncDiscoveredCerts() {
   const discovered = discoverSystemCertificates();
   let changed = false;
@@ -159,7 +154,6 @@ function syncDiscoveredCerts() {
 
 syncDiscoveredCerts();
 
-// Handle CLI flags for `nexusgate` / `ng` management script AFTER `singbox` is initialized!
 if (process.argv.length > 2 && process.argv[2].startsWith('--')) {
   handleCliCommand(process.argv.slice(2));
   process.exit(0);
@@ -223,46 +217,57 @@ function getPanelInfoSummary() {
   const host = s.webDomain || s.publicIPv4 || '127.0.0.1';
   const base = normalizeBasePath(s.webBasePath);
   const cleanUrl = `${proto}://${host}:${s.webPort}${base === '/' ? '/' : `${base}/`}`;
+  const subPath = (s.subPath || '/sub/').replace(/\/+$/, '');
+  const subUrl = `${proto}://${host}:${s.webPort}${subPath}/all`;
   return {
     version: VERSION,
     username: store.state.admin.username,
     listen: s.webListen,
     port: s.webPort,
-    basePath: base,
+    basePath: base === '/' ? '/' : `${base}/`,
     strictBasePath: Boolean(s.strictBasePath),
     https: useHttps,
     webDomain: s.webDomain || '',
     certFile: s.webCertFile || '未绑定 (HTTP)',
     defaultNodeTlsDomain: s.defaultTlsDomain || s.webDomain || 'www.apple.com',
     url: cleanUrl,
+    subUrl,
     inboundsCount: store.state.inbounds.length,
     outboundsCount: store.state.outbounds.filter((o) => !o.builtin).length,
     rulesCount: (store.state.routing?.rules || []).filter((r) => r.action !== 'sniff').length
   };
 }
 
+function printPrettyPanelInfo() {
+  const info = getPanelInfoSummary();
+  const g = '\x1b[32m';
+  const c = '\x1b[36m';
+  const y = '\x1b[33m';
+  const r = '\x1b[0m';
+  console.log(`  面板版本   : ${g}v${info.version}${r}`);
+  console.log(`  访问地址   : ${c}${info.url}${r}`);
+  console.log(`  登录账号   : ${g}${info.username}${r}`);
+  console.log(`  面板端口   : ${y}${info.port}${r}`);
+  console.log(`  安全路径   : ${y}${info.basePath}${r}`);
+  console.log(`  SSL 状态   : ${info.https ? `${g}已开启 (${info.defaultNodeTlsDomain})${r}` : `${y}未开启 (HTTP)${r}`}`);
+  console.log(`  聚合订阅   : ${c}${info.subUrl}${r}`);
+  console.log(`  节点统计   : 入站 ${c}${info.inboundsCount}${r} 个 | 出站 ${c}${info.outboundsCount}${r} 个 | 转发规则 ${c}${info.rulesCount}${r} 条`);
+  console.log(`────────────────────────────────────────────────────────────────`);
+  console.log(`  ${y}提示: 如需重置账号密码，请在菜单中输入 6${r}`);
+}
+
 function handleCliCommand(args) {
   const cmd = args[0];
-  if (cmd === '--show-info') {
-    console.log(JSON.stringify(getPanelInfoSummary(), null, 2));
+  if (cmd === '--show-info' || cmd === '--show-info-pretty') {
+    if (args[1] === '--json') {
+      console.log(JSON.stringify(getPanelInfoSummary(), null, 2));
+    } else {
+      printPrettyPanelInfo();
+    }
     return;
   }
-  if (cmd === '--show-info-pretty') {
-    const info = getPanelInfoSummary();
-    const g = '\x1b[32m';
-    const c = '\x1b[36m';
-    const y = '\x1b[33m';
-    const r = '\x1b[0m';
-    console.log(`${g}当前面板设置为：${r}`);
-    console.log(`  启用安全 (SSL) : ${c}${info.https}${r} ${info.https ? `(${info.certFile})` : ''}`);
-    console.log(`  用户名         : ${g}${info.username}${r}`);
-    console.log(`  面板端口       : ${y}${info.port}${r}`);
-    console.log(`  Web 根路径     : ${y}${info.basePath === '/' ? '/' : `${info.basePath}/`}${r} ${info.strictBasePath ? '(已开启防探测：单IP+端口返回404)' : ''}`);
-    console.log(`  默认节点域名   : ${g}${info.defaultNodeTlsDomain}${r}`);
-    console.log(`  节点与转发统计 : 入站 ${c}${info.inboundsCount}${r} 个 | 中转出站 ${c}${info.outboundsCount}${r} 个 | 路由规则 ${c}${info.rulesCount}${r} 条`);
-    console.log(`  访问 URL       : ${c}${info.url}${r}`);
-    console.log(`────────────────────────────────────────────────────────────────`);
-    console.log(`${y}⚠ 注意：如果您忘记了登录密码，可在 ng 菜单中选择 [6. 重置用户名、密码] 一键重置${r}`);
+  if (cmd === '--show-info-json') {
+    console.log(JSON.stringify(getPanelInfoSummary(), null, 2));
     return;
   }
   if (cmd === '--cleanup-memory') {
@@ -409,11 +414,9 @@ function normalizeInboundPayload(body, existing = null) {
   const enable = body.enable !== undefined ? Boolean(body.enable) : (existing ? existing.enable !== false : true);
   const outboundTag = String(body.outboundTag ?? existing?.outboundTag ?? 'default').trim();
 
-  // Separate Online IP Limit (limitIp) and Online Device Limit (limitDevice)
   const limitIp = Math.max(0, Number(body.limitIp ?? existing?.limitIp ?? 0));
   const limitDevice = Math.max(0, Number(body.limitDevice ?? existing?.limitDevice ?? 0));
 
-  // Total Traffic Quota (GB / Bytes) & Monthly Auto Reset Day (1..31, 0 = disabled) & Expiry Time
   const totalGB = Math.max(0, Number(body.totalGB ?? (existing?.total ? Math.round((existing.total / (1024 ** 3)) * 100) / 100 : 0)));
   const total = body.total !== undefined ? Number(body.total) : (totalGB > 0 ? Math.round(totalGB * (1024 ** 3)) : 0);
   const expiryTime = parseExpiryTimeInput(body.expiryTime, existing?.expiryTime || 0);
@@ -711,7 +714,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    // 3. Enforce webBasePath (Strict by default: bare IP:Port returns 404 Not Found unless /<webBasePath>/ is used!)
+    // 3. Enforce webBasePath
     const basePath = normalizeBasePath(store.state.settings.webBasePath || '/');
     if (basePath !== '/' && rawPathname === basePath && !rawPathname.endsWith('/')) {
       res.writeHead(302, { location: `${basePath}/` });
@@ -1134,7 +1137,7 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { ok: true });
     }
 
-    // 10. Routing & Diversion (3x-ui 路由规则模式)
+    // 10. Routing & Diversion
     if (pathname === '/api/routing' && method === 'GET') {
       return sendJson(res, 200, {
         routing: store.state.routing,
@@ -1285,13 +1288,13 @@ async function handleRequest(req, res) {
           st.routing.rules = [
             { id: 'rule_sniff', remark: '协议嗅探 (HTTP/TLS/QUIC)', enabled: true, action: 'sniff', inbound: [], domain: [], domain_suffix: [], domain_keyword: [], ip_cidr: [], source_ip_cidr: [], port: [], source_port: [], network: '', protocol: [], rule_set: [], ip_is_private: false, outbound: '' },
             ...relayRules,
-            { id: 'rule_private_block', remark: '阻止私有内网探测 (geoip:private · 3x-ui 标准)', enabled: true, action: 'route', inbound: [], domain: [], domain_suffix: [], domain_keyword: [], ip_cidr: [], source_ip_cidr: [], port: [], source_port: [], network: '', protocol: [], rule_set: [], ip_is_private: true, outbound: 'block' },
-            { id: 'rule_bt_block', remark: '禁止 BitTorrent 迅雷下载 (防版权投诉封 IP · 3x-ui 标准)', enabled: true, action: 'route', inbound: [], domain: [], domain_suffix: [], domain_keyword: [], ip_cidr: [], source_ip_cidr: [], port: [], source_port: [], network: '', protocol: ['bittorrent'], rule_set: [], ip_is_private: false, outbound: 'block' }
+            { id: 'rule_private_block', remark: '阻止私有内网探测 (geoip:private)', enabled: true, action: 'route', inbound: [], domain: [], domain_suffix: [], domain_keyword: [], ip_cidr: [], source_ip_cidr: [], port: [], source_port: [], network: '', protocol: [], rule_set: [], ip_is_private: true, outbound: 'block' },
+            { id: 'rule_bt_block', remark: '禁止 BitTorrent 协议下载', enabled: true, action: 'route', inbound: [], domain: [], domain_suffix: [], domain_keyword: [], ip_cidr: [], source_ip_cidr: [], port: [], source_port: [], network: '', protocol: ['bittorrent'], rule_set: [], ip_is_private: false, outbound: 'block' }
           ];
         } else if (preset === 'ai-relay') {
           st.routing.rules.push({
             id: `rule_${crypto.randomBytes(4).toString('hex')}`,
-            remark: `AI 平台全套分流 (ChatGPT/Claude/Gemini/Grok/Perplexity/Cursor -> ${targetOutbound})`,
+            remark: `AI 平台分流 (ChatGPT/Claude/Gemini/Grok/Perplexity/Cursor -> ${targetOutbound})`,
             enabled: true,
             action: 'route',
             inbound: [],

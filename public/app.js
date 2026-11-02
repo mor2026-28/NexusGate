@@ -250,10 +250,10 @@ function setPage(page) {
   const titles = {
     overview: '系统与内核总览',
     inbounds: '入站节点管理',
-    routing: '路由与转发规则 (3x-ui 模式)',
-    outbounds: '出站规则管理 (3x-ui 模式)',
+    routing: '路由规则 (转发)',
+    outbounds: '出站规则 (中转)',
     migrate: '3x-ui 无损迁移',
-    certificates: 'SSL 证书与全聚合订阅',
+    certificates: 'SSL 证书与订阅',
     settings: '面板设置与安全'
   };
   $('#page-title').textContent = titles[page] || '控制台';
@@ -331,8 +331,8 @@ function renderOverview() {
       <article class="panel">
         <div class="panel-head">
           <div>
-            <h2>系统实时状态监控 (专为 1C-1G-10G 中转机深度优化)</h2>
-            <p>${esc(sys.hostname || 'Server')} · ${esc(sys.platform || '')} · 面板常驻内存仅 ${fmtBytes(sys.panelMemoryBytes || 0)} (堆内存 ${fmtBytes(sys.panelHeapUsedBytes || 0)})</p>
+            <h2>系统实时状态监控</h2>
+            <p>${esc(sys.hostname || 'Server')} · ${esc(sys.platform || '')} · 面板内存占用 ${fmtBytes(sys.panelMemoryBytes || 0)}</p>
           </div>
           <span class="tag">运行 ${fmtUptime(sys.uptime)}</span>
         </div>
@@ -370,22 +370,21 @@ function renderOverview() {
               <strong>↑ ${fmtBytes(sys.netTraffic?.sent || 0)} · ↓ ${fmtBytes(sys.netTraffic?.recv || 0)}</strong>
             </div>
             <div class="net-stat-box">
-              <span>活跃连接 / 公网 IPv4</span>
-              <strong>TCP ${sys.tcpCount || 0} / UDP ${sys.udpCount || 0} · ${esc(sys.publicIP?.ipv4 || '127.0.0.1')}</strong>
+              <span>活跃连接数 (实时)</span>
+              <strong>TCP ${sys.tcpCount || 0} · UDP ${sys.udpCount || 0}</strong>
             </div>
           </div>
 
           <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
             <div style="font-size:12px;display:flex;align-items:center;flex-wrap:wrap;gap:4px">
-              <b>内核加速与防爆满保护:</b>
+              <b>内核加速状态:</b>
               <span class="tag ${accel.bbrEnabled ? 'tls' : ''}">TCP: ${esc(accel.congestion || 'cubic')} + ${esc(accel.qdisc || 'fq')}</span>
               <span class="tag ${accel.hy2Tuned ? 'tls' : ''}">HY2 缓冲: ${fmtBytes(accel.rmemMax || 0)}</span>
-              <span class="tag">日志限额: 64MB 自动轮转</span>
             </div>
             <div style="display:flex;flex-wrap:wrap;gap:6px">
               <button class="primary" data-action="enable-bbr-hy2">🚀 开启 BBR+FQ+HY2</button>
               <button data-action="open-firewall-ports">🛡 放行所有端口</button>
-              <button data-action="cleanup-system-memory" title="清理 journald 系统日志、临时文件并主动释放内存">🧹 清理日志与释放内存</button>
+              <button data-action="cleanup-system-memory">🧹 清理日志与释放内存</button>
             </div>
           </div>
         </div>
@@ -395,7 +394,7 @@ function renderOverview() {
         <div class="panel-head">
           <div>
             <h2>Sing-box 核心管理与版本切换</h2>
-            <p>二进制路径: ${esc(sb.binary || '/usr/local/bin/sing-box')} · 内存占用零泄漏架构</p>
+            <p>二进制路径: ${esc(sb.binary || '/usr/local/bin/sing-box')}</p>
           </div>
           <span class="status ${sb.state === 'running' ? 'running' : (sb.state === 'error' ? 'error' : 'warning')}">
             ${sb.state === 'running' ? '运行中' : (sb.state === 'error' ? '配置或进程异常' : '已停止 / 待启动')}
@@ -419,14 +418,14 @@ function renderOverview() {
             <button data-action="sb-control" data-cmd="stop">■ 停止内核</button>
             <button data-action="sb-control" data-cmd="check">✓ 校验配置</button>
             <button data-action="sb-logs">📋 查看运行日志</button>
-            <button data-action="sb-config-preview">｛｝ 预览 Sing-box JSON</button>
+            <button data-action="sb-config-preview">｛｝ 预览配置</button>
           </div>
 
           <div style="padding-top:10px;border-top:1px solid var(--line)">
             <label>
               更换 / 升级 Sing-box 内核版本 (官方 Release 自动匹配架构下载)
               <div class="input-row" style="margin-top:4px">
-                <select id="sb-version-select" style="max-width:170px">
+                <select id="sb-version-select" style="max-width:155px">
                   ${versionOptions}
                 </select>
                 <input id="sb-version-custom" placeholder="或手动输入版本号，如 v1.12.23">
@@ -441,10 +440,10 @@ function renderOverview() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>最近操作审计日志</h2><p>自动保留最近 100 条关键事件（防硬盘膨胀），记录节点变更、BBR 加速、中转配置与 3x-ui 迁移</p></div>
+        <div><h2>最近操作审计日志</h2><p>记录面板登录、节点变更、内核加速、路由转发与数据迁移事件</p></div>
         <div style="display:flex;gap:8px">
+          <button class="primary" data-action="quick-add-inbound">＋ 添加入站节点</button>
           <button class="ghost" data-action="Switch-to-routing">◇ 路由转发管理</button>
-          <button class="primary" data-action="quick-add-inbound">＋ 新建入站节点</button>
         </div>
       </div>
       <div class="panel-body">
@@ -476,6 +475,9 @@ function renderInbounds() {
   const subAllUrl = getBaseSubscriptionUrl('all');
   const totalUp = state.inbounds.reduce((acc, i) => acc + Number(i.up || 0), 0);
   const totalDown = state.inbounds.reduce((acc, i) => acc + Number(i.down || 0), 0);
+  const activeCount = state.inbounds.filter((i) => i.enable !== false).length;
+  const totalClients = state.inbounds.reduce((acc, i) => acc + (i.clients?.length || 0), 0);
+  const defaultDomain = state.defaultSettings?.defaultTlsDomain || state.settings?.webDomain || 'www.apple.com';
 
   const filterDefs = [
     ['all', `全部 (${state.inbounds.length})`],
@@ -569,42 +571,57 @@ function renderInbounds() {
   }).join('');
 
   return `
-    <div class="page-intro">
-      <p>支持搭建 VLESS (Reality/TLS/WS/gRPC)、AnyTLS、Hysteria 2 (HY2)、SS AES-128/256-GCM、SS 2022 (128/256)、SOCKS5、Mixed、Trojan、VMess、TUIC 及 Direct 端口转发。支持独立设置<b>同时在线 IP 数</b>、<b>同时在线设备数</b>、<b>到期时间</b>与<b>每月固定几号自动重置流量</b>。当前默认证书域名: <b>${esc(state.defaultSettings?.defaultTlsDomain || state.settings?.webDomain || 'www.apple.com')}</b></p>
-      <div style="display:flex;flex-wrap:wrap;gap:7px">
-        <button data-copy="${esc(subAllUrl)}">🔗 复制通用聚合订阅</button>
-        <button data-copy="${esc(`${subAllUrl}?format=clash`)}">⚡ 复制 Clash 智能订阅</button>
-        <button class="primary" data-action="open-aggregate-qr-modal">📱 全节点聚合订阅与二维码墙</button>
+    <div class="stat-strip">
+      <div class="stat-strip-item">
+        <span>总上传 / 下载</span>
+        <strong>↑ ${fmtBytes(totalUp)} / ↓ ${fmtBytes(totalDown)}</strong>
+      </div>
+      <div class="stat-strip-item">
+        <span>总流量累计</span>
+        <strong>${fmtBytes(totalUp + totalDown)}</strong>
+      </div>
+      <div class="stat-strip-item">
+        <span>入站节点数量</span>
+        <strong>${activeCount} 启用 / 共 ${state.inbounds.length} 个</strong>
+      </div>
+      <div class="stat-strip-item">
+        <span>客户端与默认证书域名</span>
+        <strong>${totalClients} 个客户端 · ${esc(defaultDomain)}</strong>
+      </div>
+    </div>
+
+    <div class="action-bar">
+      <div class="action-bar-left">
+        <button class="primary" data-action="add-inbound">＋ 添加入站</button>
+        <button class="primary" data-action="open-aggregate-qr-modal">📱 全节点聚合订阅与二维码</button>
+        <button data-copy="${esc(subAllUrl)}">🔗 复制通用订阅</button>
+        <button data-copy="${esc(`${subAllUrl}?format=clash`)}">⚡ 复制 Clash 订阅</button>
         <button data-action="copy-all-links">📋 复制全部节点链接</button>
-        <button class="primary" data-action="add-inbound">＋ 新建入站节点</button>
+        <button data-action="batch-inbounds" data-batch="enable-all">✓ 批量启用</button>
+        <button data-action="batch-inbounds" data-batch="reset-all-traffic">↻ 批量重置流量</button>
       </div>
     </div>
 
     <div class="quick-bar">
-      <span>⚡ 快捷建节点:</span>
-      <button data-action="quick-inbound" data-preset="vless-reality">VLESS + Reality + Vision</button>
-      <button data-action="quick-inbound" data-preset="anytls">AnyTLS (Sing-box 1.12+)</button>
-      <button data-action="quick-inbound" data-preset="hysteria2">Hysteria 2 (HY2 高速 UDP)</button>
+      <span>⚡ 快捷添加:</span>
+      <button data-action="quick-inbound" data-preset="vless-reality">VLESS + Reality</button>
+      <button data-action="quick-inbound" data-preset="anytls">AnyTLS</button>
+      <button data-action="quick-inbound" data-preset="hysteria2">Hysteria 2 (HY2)</button>
       <button data-action="quick-inbound" data-preset="ss2022-128">SS 2022 · 128-GCM</button>
       <button data-action="quick-inbound" data-preset="ss2022-256">SS 2022 · 256-GCM</button>
       <button data-action="quick-inbound" data-preset="ss-128">SS · AES-128-GCM</button>
-      <button data-action="quick-inbound" data-preset="socks">SOCKS5 代理</button>
-      <button data-action="quick-inbound" data-preset="direct">Direct 端口转发中转</button>
+      <button data-action="quick-inbound" data-preset="socks">SOCKS5</button>
+      <button data-action="quick-inbound" data-preset="direct">Direct 端口转发</button>
     </div>
 
     <section class="panel">
       <div class="panel-head">
         <div class="toolbar">
           <div class="toolbar-left">
-            <input class="search" data-search placeholder="搜索备注、Tag、协议、端口或中转出站..." value="${esc(state.search)}">
+            <input class="search" data-search placeholder="搜索备注、Tag、协议、端口或目标出站..." value="${esc(state.search)}">
             <div class="filter-pills">
               ${filterDefs.map(([id, label]) => `<button type="button" class="filter-pill${pf === id ? ' active' : ''}" data-action="filter-proto" data-proto="${id}">${esc(label)}</button>`).join('')}
             </div>
-          </div>
-          <div class="toolbar-right">
-            <span class="tag tls">总流量: ↑ ${fmtBytes(totalUp)} / ↓ ${fmtBytes(totalDown)}</span>
-            <button data-action="batch-inbounds" data-batch="enable-all" title="一键启用全部入站节点">批量启用</button>
-            <button data-action="batch-inbounds" data-batch="reset-all-traffic" title="一键清零全部入站节点流量">批量重置流量</button>
           </div>
         </div>
       </div>
@@ -623,7 +640,7 @@ function renderInbounds() {
             </tr>
           </thead>
           <tbody>
-            ${rows || '<tr><td colspan="8"><div class="empty"><b>没有匹配的入站节点</b><span>点击上方“⚡ 快捷建节点”或“＋ 新建入站节点”可在数秒内完成部署</span></div></td></tr>'}
+            ${rows || '<tr><td colspan="8"><div class="empty"><b>还没有入站节点</b><span>点击左上方“＋ 添加入站”或“⚡ 快捷添加”即可快速创建节点</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -631,9 +648,6 @@ function renderInbounds() {
   `;
 }
 
-/**
- * 3x-ui Style Multi-Column Routing & Forwarding Table (2nd under Node & Relay Orchestration)
- */
 function renderRouting() {
   const rules = (state.routing.rules || []).filter((r) => r.action !== 'sniff');
   const outboundOpts = state.outbounds
@@ -702,23 +716,32 @@ function renderRouting() {
   }).join('');
 
   return `
-    <div class="page-intro">
-      <p>完全还原 3x-ui 经典多列路由转发视图。默认内置 <b>3x-ui 同款纯净防探测 (<code>geoip:private</code>) 与禁 BT (<code>bittorrent</code>) 规则</b>（零外部依赖，Sing-box 毫秒级启动），同时针对 <b>AI 与外贸客户</b>提供一键分流预设。入站与出站绑定支持双向自动同步。</p>
-      <div style="display:flex;gap:8px">
-        <button data-action="Switch-to-outbounds">⇄ 管理出站规则 (${state.outbounds.filter((o) => !o.builtin).length})</button>
+    <div class="action-bar">
+      <div class="action-bar-left">
         <button class="primary" data-action="add-rule">＋ 添加路由规则</button>
+        <button data-action="routing-preset" data-preset="3xui-default" title="仅保留入站中转 + 禁止私有IP + 禁止BT下载">🛡 恢复默认防探测/禁BT规则</button>
+        <button data-action="routing-preset" data-preset="ai-relay">🤖 AI 专线分流</button>
+        <button data-action="routing-preset" data-preset="foreign-trade">🌍 外贸跨境分流</button>
+        <button data-action="routing-preset" data-preset="media-relay">🎬 流媒体分流</button>
+        <button data-action="routing-preset" data-preset="block-ads">⛔ 屏蔽广告域名</button>
+        <button data-action="Switch-to-outbounds">⇄ 管理出站规则 (${state.outbounds.filter((o) => !o.builtin).length})</button>
+      </div>
+      <div class="action-bar-right">
+        <span class="muted" style="font-size:12px;font-weight:700">默认兜底出站:</span>
+        <select id="routing-final-select" style="width:165px;min-height:34px;padding:4px 8px">${outboundOpts}</select>
+        <button data-action="save-routing-global">保存兜底</button>
       </div>
     </div>
 
     <section class="panel">
       <div class="panel-head">
         <div>
-          <h2>⚡ 3x-ui 模式：快速添加入站 ➔ 出站一对一中转规则</h2>
-          <p>选择本机某个入站节点标签，并指定转发至哪个出站节点（如 <code>inbound-48741 ➔ ace荷包蛋</code>），点击右侧按钮即可一键绑定生效</p>
+          <h2>快速添加入站 ➔ 出站一对一转发规则</h2>
+          <p>选择本机入站节点标签并指定转发至目标出站节点，点击右侧按钮即可一键绑定生效</p>
         </div>
       </div>
       <div class="panel-body">
-        <div class="form-grid" style="grid-template-columns:1fr 1fr auto;align-items:end;margin-bottom:14px">
+        <div class="form-grid" style="grid-template-columns:1fr 1fr auto;align-items:end">
           <label>
             选择入站标签 (Inbound Tag)
             <select id="quick-relay-inbound">
@@ -733,28 +756,12 @@ function renderRouting() {
           </label>
           <button class="primary" data-action="quick-add-relay-rule" style="height:38px">＋ 立即绑定转发规则</button>
         </div>
-
-        <div class="quick-bar" style="margin-bottom:0;justify-content:space-between">
-          <div style="display:flex;flex-wrap:wrap;gap:7px;align-items:center">
-            <span>⚡ 3x-ui 与 AI/外贸分流预设 (应用至上方所选出站):</span>
-            <button data-action="routing-preset" data-preset="3xui-default" title="仅保留入站中转 + 禁止私有IP + 禁止BT下载">🛡 恢复 3x-ui 纯净默认规则</button>
-            <button data-action="routing-preset" data-preset="ai-relay">🤖 AI 专线分流 (OpenAI/Claude/Gemini/Grok)</button>
-            <button data-action="routing-preset" data-preset="foreign-trade">🌍 外贸跨境分流 (Google/WhatsApp/TikTok/Meta/PayPal)</button>
-            <button data-action="routing-preset" data-preset="media-relay">🎬 流媒体分流 (Netflix/YouTube)</button>
-            <button data-action="routing-preset" data-preset="block-ads">⛔ 屏蔽广告域名</button>
-          </div>
-          <div style="display:flex;gap:7px;align-items:center">
-            <span class="muted">默认兜底出站:</span>
-            <select id="routing-final-select" style="width:165px;min-height:34px;padding:4px 8px">${outboundOpts}</select>
-            <button data-action="save-routing-global">保存兜底</button>
-          </div>
-        </div>
       </div>
     </section>
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>路由规则列表 (共 ${rules.length} 条)</h2><p>按从上往下顺序匹配；支持几十条一对一转发与域名分流规则零延迟匹配</p></div>
+        <div><h2>路由规则列表 (共 ${rules.length} 条)</h2><p>按从上往下顺序匹配，入站与出站绑定支持双向自动同步</p></div>
       </div>
       <div class="table-wrap">
         <table class="xui-routing-table">
@@ -781,7 +788,7 @@ function renderRouting() {
             </tr>
           </thead>
           <tbody>
-            ${rows || '<tr><td colspan="12"><div class="empty"><b>暂无路由规则</b><span>可使用上方“快速添加入站 ➔ 出站”或点击“＋ 添加路由规则”</span></div></td></tr>'}
+            ${rows || '<tr><td colspan="12"><div class="empty"><b>暂无路由规则</b><span>点击左上方“＋ 添加路由规则”或使用上方快速绑定功能</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -789,9 +796,6 @@ function renderRouting() {
   `;
 }
 
-/**
- * 3x-ui Style Outbounds Table (# | 标签 | 协议 | 地址 | 绑定入站 | 流量 | 操作) (3rd under Node & Relay Orchestration)
- */
 function renderOutbounds() {
   const q = state.search.toLowerCase();
   const filtered = state.outbounds.filter((item) =>
@@ -859,13 +863,12 @@ function renderOutbounds() {
   }).join('');
 
   return `
-    <div class="page-intro">
-      <p>完全对齐 3x-ui 出站规则列表（显示标签 Tag、协议、落地地址、已绑定的入站节点与实时上下行流量）。点击【＋ 添加出站】支持在弹窗内像 3x-ui 一样直接粘贴单条链接解析或切换 <code>Form / JSON</code> 视图，也支持点击【🔗 批量粘贴链接导入出站】一次性导入几十个落地节点。</p>
-      <div style="display:flex;flex-wrap:wrap;gap:7px">
-        <button data-action="Switch-to-routing">◇ 前往路由规则绑定</button>
-        <button data-action="ping-all-outbounds">⚡ 批量检测全部出站延迟</button>
-        <button data-action="import-outbound-uri">🔗 批量粘贴链接导入出站</button>
+    <div class="action-bar">
+      <div class="action-bar-left">
         <button class="primary" data-action="add-outbound">＋ 添加出站</button>
+        <button data-action="import-outbound-uri">🔗 批量粘贴链接导入出站</button>
+        <button data-action="ping-all-outbounds">⚡ 批量检测全部出站延迟</button>
+        <button data-action="Switch-to-routing">◇ 前往路由规则绑定</button>
       </div>
     </div>
 
@@ -873,7 +876,7 @@ function renderOutbounds() {
       <div class="panel-head">
         <div class="toolbar">
           <div class="toolbar-left">
-            <input class="search" data-search placeholder="搜索出站标签 (如 ace荷包蛋 / NTT 193)、协议或 IP 地址..." value="${esc(state.search)}">
+            <input class="search" data-search placeholder="搜索出站标签、协议或服务器地址..." value="${esc(state.search)}">
             <span class="tag">共 ${state.outbounds.length} 个出站 (${state.outbounds.filter((o) => !o.builtin).length} 个自定义落地)</span>
           </div>
         </div>
@@ -933,16 +936,12 @@ function renderMigrate() {
   `).join('');
 
   return `
-    <div class="page-intro">
-      <p>完全兼容 3x-ui 的 SQLite 数据库 (<code>x-ui.db</code>)、打包备份文件 (如 <code>3xui_backup.tar.gz</code>) 与 Xray 配置文件。支持一次性无损迁移几十上百个入站节点（完整保留原端口、UUID、SS/SS2022 密钥、Reality 公私钥、shortIds、TLS 证书、客户端 IP 限制、到期时间与流量统计）、Dokodemo 隧道转发、全部中转出站（如 <code>ace荷包蛋</code>、<code>US-tsnzqn15</code>、<code>NTT 193</code> 等）及路由转发规则，<b>现有客户无需修改客户端配置即可无缝继续使用</b>。</p>
-    </div>
-
     ${previewHtml}
 
     <section class="grid-2">
       <article class="panel">
         <div class="panel-head">
-          <div><h2>方式一：上传 x-ui.db / 3xui_backup.tar.gz 或读取本机</h2><p>支持直接上传 x-ui.db 数据库或 .tar.gz 压缩备份包</p></div>
+          <div><h2>方式一：上传 x-ui.db / 备份包 或读取本机</h2><p>支持直接上传 x-ui.db 数据库、.tar.gz 备份包，完整保留原端口、密钥、出站中转与路由规则</p></div>
         </div>
         <div class="panel-body stack">
           <label class="upload-dropzone" for="xui-db-file">
@@ -955,7 +954,7 @@ function renderMigrate() {
             迁移合并策略
             <select id="migrate-mode">
               <option value="merge">智能合并（保留当前面板已有节点，同端口/同Tag自动更新）</option>
-              <option value="replace">完整替换（清空当前节点，100% 还原为 3x-ui 的入站、出站与路由转发）</option>
+              <option value="replace">完整替换（清空当前节点，完整还原导入的入站、出站与路由转发）</option>
             </select>
           </label>
 
@@ -969,7 +968,7 @@ function renderMigrate() {
               或者直接从服务器本机路径读取 (支持 <code>/etc/x-ui/x-ui.db</code> 或 <code>/root/3xui_backup.tar.gz</code>)
               <div class="input-row" style="margin-top:4px">
                 <input id="local-xui-path" value="/etc/x-ui/x-ui.db" placeholder="/etc/x-ui/x-ui.db 或 /root/3xui_backup.tar.gz">
-                <button class="primary" data-action="migrate-local-xui">一键迁移本机 3x-ui</button>
+                <button class="primary" data-action="migrate-local-xui">一键迁移本机数据</button>
               </div>
               <small>本机状态: ${state.overview?.local3xuiExists ? '✅ 已检测到本机 3x-ui 数据库或备份包' : '可填入服务器上的 .db 或 .tar.gz 路径一键读取'}</small>
             </label>
@@ -979,11 +978,11 @@ function renderMigrate() {
 
       <article class="panel">
         <div class="panel-head">
-          <div><h2>方式二：粘贴 3x-ui 配置 JSON / 导出数据</h2><p>支持粘贴 3x-ui 的 xrayTemplateConfig JSON 或入站数组 JSON</p></div>
+          <div><h2>方式二：粘贴配置 JSON 导入</h2><p>支持粘贴 xrayTemplateConfig JSON 或入站数组 JSON</p></div>
         </div>
         <div class="panel-body stack">
           <label>
-            3x-ui / Xray JSON 内容
+            配置 JSON 内容
             <textarea id="xui-json-input" style="min-height:190px" placeholder='{"inbounds": [...], "outbounds": [...], "routing": {"rules": [...]}}'></textarea>
           </label>
           <div style="display:flex;justify-content:flex-end;gap:8px">
@@ -996,7 +995,7 @@ function renderMigrate() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>历史迁移记录</h2><p>历次 3x-ui 数据导入审计</p></div>
+        <div><h2>历史迁移记录</h2><p>历次数据无损导入审计</p></div>
       </div>
       <div class="table-wrap">
         <table>
@@ -1052,12 +1051,12 @@ function renderCertificates() {
   }).join('');
 
   return `
-    <div class="page-intro">
-      <p>自动扫描并优先启用本机已申请的 ACME 域名证书（如 <code>/root/cert/*</code>），自动替换初始自签证书并同步设为<b>面板 HTTPS 证书</b>与<b>所有 TLS 节点默认证书</b>，新建节点时默认即为已申请的证书域名。</p>
-      <div style="display:flex;flex-wrap:wrap;gap:8px">
+    <div class="action-bar">
+      <div class="action-bar-left">
+        <button class="primary" data-action="cert-acme">🌐 ACME 自动申请证书 (域名 / CF DNS / IP证书)</button>
         <button data-action="cert-selfsigned">⚡ 生成 10 年自签证书 (免域名)</button>
         <button data-action="cert-custom">📋 粘贴 / 导入已有证书</button>
-        <button class="primary" data-action="cert-acme">🌐 ACME 自动申请证书 (域名 / CF DNS / IP证书)</button>
+        <button class="primary" data-action="open-aggregate-qr-modal">📱 打开全节点聚合订阅与二维码</button>
       </div>
     </div>
 
@@ -1069,7 +1068,7 @@ function renderCertificates() {
         <table>
           <thead><tr><th>域名 / 标识</th><th>用途与类型</th><th>证书文件路径</th><th>到期时间 / 签发者</th><th>状态</th><th style="text-align:right">操作</th></tr></thead>
           <tbody>
-            ${certRows || '<tr><td colspan="6"><div class="empty"><b>尚未添加自定义或 ACME 证书</b><span>点击右上角“🌐 ACME 自动申请证书”即可一键配置面板与节点证书</span></div></td></tr>'}
+            ${certRows || '<tr><td colspan="6"><div class="empty"><b>尚未添加自定义或 ACME 证书</b><span>点击左上方“🌐 ACME 自动申请证书”即可一键配置面板与节点证书</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -1077,48 +1076,50 @@ function renderCertificates() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>全节点聚合订阅中心 (内置 AI 专线 + 外贸跨境智能分流规则)</h2><p>自动聚合面板所有已启用节点，支持 Shadowrocket、v2rayN、v2rayNG、NekoBox、Clash Verge / Mihomo、Sing-box、Stash、Surge、Hiddify 直接导入或展开扫码</p></div>
-        <button class="primary" data-action="open-aggregate-qr-modal">📱 打开全节点二维码墙</button>
+        <div><h2>全节点聚合订阅中心</h2><p>支持 Shadowrocket、v2rayN、v2rayNG、NekoBox、Clash Verge / Mihomo、Sing-box、Stash、Surge、Hiddify 直接导入或按需展开二维码</p></div>
       </div>
       <div class="panel-body">
-        <div class="grid-3">
-          <div class="subscription-row" style="margin-bottom:0">
-            <div>
-              <b>1. 通用 Base64 全节点聚合订阅</b>
-              <small>适用于 v2rayN / v2rayNG / Shadowrocket / NekoBox</small>
-              <code>${esc(baseSubUrl)}</code>
+        <div class="qr-wall-grid">
+          <div class="qr-wall-card">
+            <div class="qr-wall-head">
+              <strong>1. 通用 Base64 全节点聚合订阅</strong>
+              <span class="tag">Base64</span>
             </div>
-            <div style="display:flex;gap:6px;width:100%;justify-content:flex-end">
-              <button class="primary" data-copy="${esc(baseSubUrl)}">📋 复制通用聚合订阅</button>
+            <div class="qr-wall-sub">适用于 v2rayN / v2rayNG / Shadowrocket / NekoBox</div>
+            <code style="font-size:11.5px;color:var(--primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(baseSubUrl)}</code>
+            <div class="qr-wall-actions">
+              <button class="primary" data-copy="${esc(baseSubUrl)}">📋 复制通用订阅</button>
               <button data-qr-inline="cert-qr-base64" data-qr-text="${esc(baseSubUrl)}">📱 展开/收起二维码</button>
             </div>
-            <div id="cert-qr-base64" class="subscription-qr hidden">${makeQrSvg(baseSubUrl)}</div>
+            <div id="cert-qr-base64" class="subscription-qr hidden"></div>
           </div>
 
-          <div class="subscription-row" style="margin-bottom:0">
-            <div>
-              <b>2. Clash / Mihomo 智能分流聚合订阅</b>
-              <small>内置 AI 专线 / 外贸 Google / Netflix / 自动测速策略组</small>
-              <code>${esc(clashSubUrl)}</code>
+          <div class="qr-wall-card">
+            <div class="qr-wall-head">
+              <strong>2. Clash / Mihomo 智能分流订阅</strong>
+              <span class="tag tls">Clash YAML</span>
             </div>
-            <div style="display:flex;gap:6px;width:100%;justify-content:flex-end">
-              <button class="primary" data-copy="${esc(clashSubUrl)}">📋 复制 Clash 聚合订阅</button>
+            <div class="qr-wall-sub">内置 AI 专线 / 外贸 Google / Netflix / 自动测速策略组</div>
+            <code style="font-size:11.5px;color:var(--primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(clashSubUrl)}</code>
+            <div class="qr-wall-actions">
+              <button class="primary" data-copy="${esc(clashSubUrl)}">📋 复制 Clash 订阅</button>
               <button data-qr-inline="cert-qr-clash" data-qr-text="${esc(clashSubUrl)}">📱 展开/收起二维码</button>
             </div>
-            <div id="cert-qr-clash" class="subscription-qr hidden">${makeQrSvg(clashSubUrl)}</div>
+            <div id="cert-qr-clash" class="subscription-qr hidden"></div>
           </div>
 
-          <div class="subscription-row" style="margin-bottom:0">
-            <div>
-              <b>3. Sing-box 客户端 JSON 聚合订阅</b>
-              <small>适用于 Sing-box (SFI / SFA / SFM) 移动端与桌面端</small>
-              <code>${esc(singboxSubUrl)}</code>
+          <div class="qr-wall-card">
+            <div class="qr-wall-head">
+              <strong>3. Sing-box 客户端 JSON 订阅</strong>
+              <span class="tag relay">Sing-box</span>
             </div>
-            <div style="display:flex;gap:6px;width:100%;justify-content:flex-end">
-              <button class="primary" data-copy="${esc(singboxSubUrl)}">📋 复制 Sing-box 聚合订阅</button>
+            <div class="qr-wall-sub">适用于 Sing-box (SFI / SFA / SFM) 客户端</div>
+            <code style="font-size:11.5px;color:var(--primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(singboxSubUrl)}</code>
+            <div class="qr-wall-actions">
+              <button class="primary" data-copy="${esc(singboxSubUrl)}">📋 复制 Sing-box 订阅</button>
               <button data-qr-inline="cert-qr-sb" data-qr-text="${esc(singboxSubUrl)}">📱 展开/收起二维码</button>
             </div>
-            <div id="cert-qr-sb" class="subscription-qr hidden">${makeQrSvg(singboxSubUrl)}</div>
+            <div id="cert-qr-sb" class="subscription-qr hidden"></div>
           </div>
         </div>
       </div>
@@ -1134,10 +1135,9 @@ function renderSettings() {
   ].join('');
 
   return `
-    <div class="page-intro">
-      <p>配置面板端口（支持一键随机端口）、16 位高强度随机安全路径（<code>webBasePath</code>，默认单 IP+端口返回 404，必须携带安全路径才可访问）、全局每月流量自动重置日、面板 HTTPS 证书以及管理员账号密码。</p>
-      <div style="display:flex;gap:8px">
-        <a class="button" href="${BASE_PATH}/api/backup" target="_blank">⬇ 导出完整面板备份 (.json)</a>
+    <div class="action-bar">
+      <div class="action-bar-left">
+        <a class="button primary" href="${BASE_PATH}/api/backup" target="_blank">⬇ 导出完整面板备份 (.json)</a>
         <button data-action="restore-backup-modal">⬆ 导入恢复备份</button>
       </div>
     </div>
@@ -1176,11 +1176,11 @@ function renderSettings() {
 
           <label>
             服务器公网 IPv4 (用于生成节点连接地址)
-            <input name="publicIPv4" value="${esc(s.publicIPv4 || '')}" placeholder="如 216.23.82.153">
+            <input name="publicIPv4" value="${esc(s.publicIPv4 || '')}" placeholder="自动检测本机公网 IPv4">
           </label>
           <label>
             面板 / 节点绑定域名 (webDomain)
-            <input name="webDomain" id="setting-webdomain" value="${esc(s.webDomain || '')}" placeholder="如 cs.vponlive.com">
+            <input name="webDomain" id="setting-webdomain" value="${esc(s.webDomain || '')}" placeholder="填写已解析的域名">
           </label>
 
           <div class="section-title">面板 HTTPS (SSL 证书配置)</div>
@@ -1197,7 +1197,7 @@ function renderSettings() {
             <input name="webKeyFile" id="setting-key-file" value="${esc(s.webKeyFile || '')}" placeholder="留空则为 HTTP 模式">
           </label>
 
-          <div class="section-title">订阅、流量重置与低内存日志优化</div>
+          <div class="section-title">订阅、流量重置与日志级别</div>
           <label>
             订阅路径前缀 (subPath)
             <input name="subPath" value="${esc(s.subPath || '/sub/')}" placeholder="/sub/">
@@ -1207,12 +1207,12 @@ function renderSettings() {
             <input name="trafficResetDay" type="number" min="0" max="31" value="${esc(s.trafficResetDay || 0)}" placeholder="0 表示按单节点设置">
           </label>
           <label class="wide">
-            Sing-box 日志级别 (1C-1G-10G 中转机强烈建议使用 warn 精简模式，防日志文件占满硬盘)
+            Sing-box 日志级别
             <select name="singboxLogLevel">
-              <option value="warn"${selected('warn', s.singboxLogLevel || 'warn')}>warn (推荐 · 同 3x-ui 精简模式，省内存省硬盘)</option>
+              <option value="warn"${selected('warn', s.singboxLogLevel || 'warn')}>warn (推荐 · 精简日志，省内存省硬盘)</option>
               <option value="info"${selected('info', s.singboxLogLevel)}>info (标准日志)</option>
-              <option value="error"${selected('error', s.singboxLogLevel)}>error (仅记录严重错误)</option>
-              <option value="debug"${selected('debug', s.singboxLogLevel)}>debug (仅排错时临时开启)</option>
+              <option value="error"${selected('error', s.singboxLogLevel)}>error (仅记录错误)</option>
+              <option value="debug"${selected('debug', s.singboxLogLevel)}>debug (调试模式)</option>
             </select>
           </label>
 
@@ -1254,19 +1254,19 @@ function renderSettings() {
 
         <article class="panel">
           <div class="panel-head">
-            <div><h2>3x-ui 风格 SSH 命令行管理菜单 (0-26 完整功能)</h2><p>在服务器 SSH 终端输入 <code>ng</code> 或 <code>nexusgate</code> 即可呼出完整管理面板</p></div>
+            <div><h2>SSH 命令行快捷管理菜单</h2><p>在服务器 SSH 终端输入 <code>ng</code> 或 <code>nexusgate</code> 即可呼出完整管理面板</p></div>
           </div>
           <div class="panel-body">
             <div class="command-item">
               <div>
-                <b>呼出 0-26 完整交互式管理菜单 (含 SSL / BBR+HY2 / 防火墙 / 内存清理)</b>
+                <b>呼出完整交互式管理菜单 (含 SSL / BBR+HY2 / 防火墙 / 内存清理)</b>
                 <code>ng  或  nexusgate</code>
               </div>
               <button data-copy="ng">复制</button>
             </div>
             <div class="command-item">
               <div>
-                <b>查看当前面板完整设置 (3x-ui 风格清晰展示 SSL/账号/端口/根路径/访问 URL)</b>
+                <b>查看当前面板完整设置与访问地址 (简洁明了，方便直接复制)</b>
                 <code>ng info</code>
               </div>
               <button data-copy="ng info">复制</button>
@@ -1413,12 +1413,12 @@ async function openInboundModal(existing = null, preset = '') {
 
   openModal(
     existing ? '编辑入站节点' : '新建入站节点',
-    existing ? `${existing.remark} (:${existing.port})` : '配置 Sing-box 入站协议、IP/设备限制、到期时间、流量重置与中转出站',
+    existing ? `${existing.remark} (:${existing.port})` : '配置入站协议、IP/设备限制、到期时间、流量重置与中转出站',
     `
     <form id="inbound-form" class="form-grid" data-id="${esc(existing?.id || '')}">
       <label>
         节点备注名称
-        <input name="remark" value="${esc(item.remark)}" placeholder="如 JP-VLESS-Reality" required>
+        <input name="remark" value="${esc(item.remark)}" placeholder="如 VLESS-Reality" required>
       </label>
       <label>
         入站协议 (Protocol)
@@ -1443,7 +1443,7 @@ async function openInboundModal(existing = null, preset = '') {
       <label>
         限制同时在线公网 IP 数 (0 = 不限制)
         <input name="limitIp" type="number" min="0" max="1000" value="${esc(item.limitIp || 0)}" placeholder="0 表示不限制公网 IP 数">
-        <small>防多地共享：超出设定公网 IP 数量的新 IP 连接将被实时自动断开</small>
+        <small>超出设定公网 IP 数量的新连接将被实时自动断开</small>
       </label>
       <label>
         限制同时在线设备数 (0 = 不限制)
@@ -1496,7 +1496,7 @@ async function openInboundModal(existing = null, preset = '') {
 
     if (proto === 'direct') {
       box.innerHTML = `
-        <div class="section-title">Direct 端口转发 (Dokodemo-door 隧道中转配置)</div>
+        <div class="section-title">Direct 端口转发 (隧道中转配置)</div>
         <label>
           转发目标地址 (Override Address)
           <input name="overrideAddress" value="${esc(item.overrideAddress || '')}" placeholder="目标落地机 IP 或域名" required>
@@ -1559,7 +1559,7 @@ async function openInboundModal(existing = null, preset = '') {
 
     if (proto === 'anytls') {
       box.innerHTML = `
-        <div class="section-title">AnyTLS 认证与 TLS 证书配置 (已自动预填申请的域名证书: ${esc(defTlsDomain)})</div>
+        <div class="section-title">AnyTLS 认证与 TLS 证书配置 (默认域名: ${esc(defTlsDomain)})</div>
         <label>
           AnyTLS 访问密码
           <div class="input-row">
@@ -1633,7 +1633,6 @@ async function openInboundModal(existing = null, preset = '') {
       return;
     }
 
-    // VLESS / Trojan / VMess / TUIC
     const sec = item.security || (proto === 'tuic' ? 'tls' : 'reality');
     const trans = item.transport || 'tcp';
     const isUuidProto = ['vless', 'vmess', 'tuic'].includes(proto);
@@ -1675,7 +1674,7 @@ async function openInboundModal(existing = null, preset = '') {
         安全层加密 (Security)
         <select name="security" id="inb-sec-select">
           <option value="reality"${selected('reality', sec)}>Reality (免证书高隐蔽 · 推荐)</option>
-          <option value="tls"${selected('tls', sec)}>TLS (自动使用已申请的域名证书: ${esc(defTlsDomain)})</option>
+          <option value="tls"${selected('tls', sec)}>TLS (默认使用域名证书: ${esc(defTlsDomain)})</option>
           <option value="none"${selected('none', sec)}>无加密 (None · 适合内网中转或外层反代)</option>
         </select>
       </label>
@@ -1704,11 +1703,11 @@ async function openInboundModal(existing = null, preset = '') {
         if (curSec === 'reality') {
           const r = item.reality || {};
           secBox.innerHTML = `
-            <div class="section-title">Reality 伪装与 X25519 密钥对 (已剔除 Cloudflare / 微软域名，默认 Apple 高可用伪装)</div>
+            <div class="section-title">Reality 伪装与 X25519 密钥对 (默认 Apple 高可用伪装)</div>
             <label>
-              伪装目标预设 (SNI · 严选非 CF 高可用大厂域名)
+              伪装目标预设 (SNI)
               <select id="inb-reality-preset">
-                <option value="">— 选择高可用大厂 SNI 预设 —</option>
+                <option value="">— 选择高可用 SNI 预设 —</option>
                 ${state.catalog.realityPresets.map((p) => `<option value="${esc(p.serverName)}" data-target="${esc(p.target)}"${selected(p.serverName, r.serverName || 'www.apple.com')}>${esc(p.label)}</option>`).join('')}
               </select>
             </label>
@@ -1802,9 +1801,9 @@ function openInboundLinksModal(inbound) {
     <div class="subscription-row">
       <div>
         <b>${esc(l.name)} (${esc(l.protocol.toUpperCase())} · 端口 :${inbound.port})</b>
-        <small style="color:var(--success)">✓ 标准合规格式，支持 v2rayN / v2rayNG / Shadowrocket / NekoBox / Mihomo / Sing-box / Hiddify 直接导入或展开扫码</small>
+        <small style="color:var(--success)">✓ 支持 v2rayN / v2rayNG / Shadowrocket / NekoBox / Mihomo / Sing-box / Hiddify 直接导入或展开扫码</small>
         <code style="white-space:normal;word-break:break-all;display:block;margin-top:4px;padding:8px;background:var(--surface);border:1px solid var(--line);border-radius:8px">${esc(l.uri)}</code>
-        ${l.altUri ? `<small style="margin-top:4px">备用兼容链接 (SIP002 / HY2): <code>${esc(l.altUri)}</code></small>` : ''}
+        ${l.altUri ? `<small style="margin-top:4px">备用兼容链接: <code>${esc(l.altUri)}</code></small>` : ''}
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;width:100%;justify-content:flex-end">
         <button class="primary" data-copy="${esc(l.uri)}">📋 复制节点链接</button>
@@ -1822,10 +1821,10 @@ function openInboundLinksModal(inbound) {
     `${inbound.remark} (${inbound.protocol.toUpperCase()})`,
     `
     <div class="stack">
-      <div class="section-title" style="margin-top:0">一、单节点分享链接与扫码导入 (默认收起二维码，点击按钮展开)</div>
+      <div class="section-title" style="margin-top:0">一、单节点分享链接 (默认收起二维码，点击按钮展开)</div>
       ${rows || '<div class="empty"><b>该入站暂无可用客户端链接</b><span>请检查客户端是否已启用</span></div>'}
 
-      <div class="section-title">二、当前节点专属订阅链接 (支持自动同步流量与到期时间)</div>
+      <div class="section-title">二、当前节点专属订阅链接</div>
       <div class="subscription-row">
         <div>
           <b>当前节点专属订阅地址 (Base64 / Clash / Sing-box)</b>
@@ -1833,7 +1832,7 @@ function openInboundLinksModal(inbound) {
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:6px">
           <button class="primary" data-copy="${esc(clientSubUrl)}">复制 Base64 订阅</button>
-          <button data-copy="${esc(`${clientSubUrl}?format=clash`)}">复制 Clash 智能订阅</button>
+          <button data-copy="${esc(`${clientSubUrl}?format=clash`)}">复制 Clash 订阅</button>
           <button data-copy="${esc(`${clientSubUrl}?format=singbox`)}">复制 Sing-box 订阅</button>
           <button data-qr-inline="qr-sub-box" data-qr-text="${esc(clientSubUrl)}">📱 展开/收起订阅二维码</button>
         </div>
@@ -1852,16 +1851,16 @@ function openInboundLinksModal(inbound) {
           <button class="primary" data-copy="${esc(allClashUrl)}">复制全节点 Clash 订阅</button>
           <button data-copy="${esc(`${allSubUrl}?format=singbox`)}">复制全节点 Sing-box 订阅</button>
           <button data-qr-inline="qr-all-sub-box" data-qr-text="${esc(allSubUrl)}">📱 展开/收起聚合二维码</button>
-          <button data-action="open-aggregate-qr-modal">📱 打开全部节点二维码墙</button>
+          <button data-action="open-aggregate-qr-modal">📱 打开全部节点二维码中心</button>
         </div>
         <div id="qr-all-sub-box" class="subscription-qr hidden">
           <div class="grid-2" style="width:100%;margin-top:4px">
             <div>
-              <b style="display:block;font-size:12px;margin-bottom:6px">📱 全节点通用订阅二维码 (v2rayN/小火箭)</b>
+              <b style="display:block;font-size:12px;margin-bottom:6px">📱 全节点通用订阅二维码</b>
               ${makeQrSvg(allSubUrl)}
             </div>
             <div>
-              <b style="display:block;font-size:12px;margin-bottom:6px">⚡ 全节点 Clash 智能分流二维码</b>
+              <b style="display:block;font-size:12px;margin-bottom:6px">⚡ 全节点 Clash 分流二维码</b>
               ${makeQrSvg(allClashUrl)}
             </div>
           </div>
@@ -1872,23 +1871,26 @@ function openInboundLinksModal(inbound) {
   );
 }
 
+/**
+ * Compact All-Nodes Aggregate Subscription & QR Wall Modal (Fixed .qr-wall-card layout — zero blank space!)
+ */
 function openAggregateQrModal() {
   const allSubUrl = getBaseSubscriptionUrl('all');
   const clashSubUrl = `${allSubUrl}?format=clash`;
   const singboxSubUrl = `${allSubUrl}?format=singbox`;
 
-  const allNodeCards = state.inbounds
-    .filter((i) => i.enable !== false && i.protocol !== 'direct')
+  const enabledNodes = state.inbounds.filter((i) => i.enable !== false && i.protocol !== 'direct');
+  const allNodeCards = enabledNodes
     .flatMap((inb) => (inb.links || []).map((l) => ({ inb, l })))
     .map(({ inb, l }, idx) => `
-      <div class="subscription-row" style="margin-bottom:0;flex-direction:column;align-items:stretch">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-          <strong style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.name)}</strong>
+      <div class="qr-wall-card">
+        <div class="qr-wall-head">
+          <strong title="${esc(l.name)}">${esc(l.name)}</strong>
           <span class="tag">${esc(inb.protocol.toUpperCase())} :${inb.port}</span>
         </div>
-        <div style="display:flex;gap:6px;margin-top:6px">
-          <button class="primary" style="flex:1" data-copy="${esc(l.uri)}">复制链接</button>
-          <button style="flex:1" data-qr-inline="wall-qr-${idx}" data-qr-text="${esc(l.uri)}">📱 展开二维码</button>
+        <div class="qr-wall-actions">
+          <button class="primary" data-copy="${esc(l.uri)}">📋 复制链接</button>
+          <button data-qr-inline="wall-qr-${idx}" data-qr-text="${esc(l.uri)}">📱 展开二维码</button>
         </div>
         <div id="wall-qr-${idx}" class="subscription-qr hidden"></div>
       </div>
@@ -1897,48 +1899,53 @@ function openAggregateQrModal() {
 
   openModal(
     '全节点聚合订阅与二维码中心',
-    `聚合全部 ${state.inbounds.filter((i) => i.enable !== false && i.protocol !== 'direct').length} 个启用节点`,
+    `聚合全部 ${enabledNodes.length} 个启用节点`,
     `
     <div class="stack">
       <div class="section-title" style="margin-top:0">一、全节点聚合订阅链接 (点击可展开二维码)</div>
-      <div class="grid-3">
-        <div class="subscription-row" style="margin-bottom:0;flex-direction:column;align-items:stretch">
-          <div>
-            <b>通用 Base64 聚合订阅</b>
-            <small class="muted">v2rayN / Shadowrocket / v2rayNG</small>
+      <div class="qr-wall-grid">
+        <div class="qr-wall-card">
+          <div class="qr-wall-head">
+            <strong>通用 Base64 聚合订阅</strong>
+            <span class="tag">Base64</span>
           </div>
-          <div style="display:flex;gap:6px;margin-top:6px">
-            <button class="primary" style="flex:1" data-copy="${esc(allSubUrl)}">复制通用订阅</button>
-            <button data-qr-inline="agg-qr-b64" data-qr-text="${esc(allSubUrl)}">📱 二维码</button>
+          <div class="qr-wall-sub">v2rayN / Shadowrocket / v2rayNG / NekoBox</div>
+          <div class="qr-wall-actions">
+            <button class="primary" data-copy="${esc(allSubUrl)}">📋 复制通用订阅</button>
+            <button data-qr-inline="agg-qr-b64" data-qr-text="${esc(allSubUrl)}">📱 展开二维码</button>
           </div>
           <div id="agg-qr-b64" class="subscription-qr hidden"></div>
         </div>
-        <div class="subscription-row" style="margin-bottom:0;flex-direction:column;align-items:stretch">
-          <div>
-            <b>Clash / Mihomo 智能分流订阅</b>
-            <small class="muted">含 AI 专线 / 外贸 Google / 自动测速</small>
+
+        <div class="qr-wall-card">
+          <div class="qr-wall-head">
+            <strong>Clash / Mihomo 智能分流</strong>
+            <span class="tag tls">Clash</span>
           </div>
-          <div style="display:flex;gap:6px;margin-top:6px">
-            <button class="primary" style="flex:1" data-copy="${esc(clashSubUrl)}">复制 Clash 订阅</button>
-            <button data-qr-inline="agg-qr-clash" data-qr-text="${esc(clashSubUrl)}">📱 二维码</button>
+          <div class="qr-wall-sub">内置 AI 专线 / 外贸 Google / 自动测速策略组</div>
+          <div class="qr-wall-actions">
+            <button class="primary" data-copy="${esc(clashSubUrl)}">📋 复制 Clash 订阅</button>
+            <button data-qr-inline="agg-qr-clash" data-qr-text="${esc(clashSubUrl)}">📱 展开二维码</button>
           </div>
           <div id="agg-qr-clash" class="subscription-qr hidden"></div>
         </div>
-        <div class="subscription-row" style="margin-bottom:0;flex-direction:column;align-items:stretch">
-          <div>
-            <b>Sing-box JSON 聚合订阅</b>
-            <small class="muted">SFI / SFA / SFM 客户端</small>
+
+        <div class="qr-wall-card">
+          <div class="qr-wall-head">
+            <strong>Sing-box JSON 聚合订阅</strong>
+            <span class="tag relay">Sing-box</span>
           </div>
-          <div style="display:flex;gap:6px;margin-top:6px">
-            <button class="primary" style="flex:1" data-copy="${esc(singboxSubUrl)}">复制 Sing-box 订阅</button>
-            <button data-qr-inline="agg-qr-sb" data-qr-text="${esc(singboxSubUrl)}">📱 二维码</button>
+          <div class="qr-wall-sub">SFI / SFA / SFM 客户端直接导入</div>
+          <div class="qr-wall-actions">
+            <button class="primary" data-copy="${esc(singboxSubUrl)}">📋 复制 Sing-box 订阅</button>
+            <button data-qr-inline="agg-qr-sb" data-qr-text="${esc(singboxSubUrl)}">📱 展开二维码</button>
           </div>
           <div id="agg-qr-sb" class="subscription-qr hidden"></div>
         </div>
       </div>
 
-      <div class="section-title">二、全部单节点快速复制与按需展开二维码 (${state.inbounds.filter((i) => i.enable !== false && i.protocol !== 'direct').length} 个节点)</div>
-      <div class="grid-3">
+      <div class="section-title">二、全部单节点快速复制与按需展开二维码 (${enabledNodes.length} 个节点)</div>
+      <div class="qr-wall-grid">
         ${allNodeCards || '<div class="empty" style="grid-column:1/-1"><b>暂无已启用的入站节点</b></div>'}
       </div>
     </div>
@@ -1946,9 +1953,6 @@ function openAggregateQrModal() {
   );
 }
 
-/**
- * 3x-ui Style Outbound Modal with Form / JSON tabs and quick URI parser bar
- */
 function openOutboundModal(existing = null) {
   const item = existing || {
     remark: '',
@@ -1983,7 +1987,7 @@ function openOutboundModal(existing = null) {
   }, null, 2);
 
   openModal(
-    existing ? `编辑出站 (${existing.tag})` : '添加出站规则 (3x-ui 模式)',
+    existing ? `编辑出站 (${existing.tag})` : '添加出站规则',
     existing ? `${existing.tag} (${existing.server}:${existing.port})` : '支持直接粘贴节点链接一键解析或切换 Form / JSON 编辑',
     `
     <div class="stack">
@@ -2002,8 +2006,8 @@ function openOutboundModal(existing = null) {
       <form id="outbound-form" class="form-grid" data-id="${esc(existing?.id || '')}">
         <div id="out-form-pane" class="form-grid wide" style="margin:0">
           <label>
-            出站标签 (Tag · 用于路由规则绑定，如 ace荷包蛋 / NTT 193)
-            <input name="tag" id="out-f-tag" value="${esc(item.tag)}" placeholder="如 ace荷包蛋 或 US-tsnzqn15" required>
+            出站标签 (Tag · 用于路由规则绑定)
+            <input name="tag" id="out-f-tag" value="${esc(item.tag)}" placeholder="输入出站节点标签名称" required>
           </label>
           <label>
             出站协议 (Protocol)
@@ -2014,7 +2018,7 @@ function openOutboundModal(existing = null) {
 
           <label>
             落地服务器地址 (IP 或域名)
-            <input name="server" id="out-f-server" value="${esc(item.server || '')}" placeholder="如 216.167.79.95" required>
+            <input name="server" id="out-f-server" value="${esc(item.server || '')}" placeholder="输入落地机 IP 或域名" required>
           </label>
           <label>
             落地服务器端口 (Port)
@@ -2132,7 +2136,7 @@ function openRuleModal(existing = null) {
   }).join('');
 
   openModal(
-    existing ? '编辑路由规则 (3x-ui 模式)' : '添加路由规则 (3x-ui 模式)',
+    existing ? '编辑路由规则' : '添加路由规则',
     existing ? (r.remark || `规则 -> ${r.outbound}`) : '配置入站转发映射或域名/IP分流规则',
     `
     <form id="rule-form" class="form-grid" data-id="${esc(existing?.id || '')}">
@@ -2141,7 +2145,7 @@ function openRuleModal(existing = null) {
         <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--surface-soft);max-height:140px;overflow:auto">
           ${inboundChecks || '<span class="muted">当前尚无入站节点，也可以在下方手动输入入站 Tag</span>'}
         </div>
-        <input name="inbound" value="${esc((r.inbound || []).join(', '))}" placeholder="或手动输入入站标签，逗号分隔，如 inbound-48741, inbound-35807" style="margin-top:4px">
+        <input name="inbound" value="${esc((r.inbound || []).join(', '))}" placeholder="或手动输入入站标签，逗号分隔" style="margin-top:4px">
       </label>
 
       <label>
@@ -2604,12 +2608,12 @@ document.addEventListener('click', async (e) => {
         method: 'POST',
         body: JSON.stringify({ source: 'local', dbPath })
       });
-      toast(`🎉 本机 3x-ui 无损迁移完成: 入站 ${res.summary.inboundsCount} 个，出站 ${res.summary.outboundsCount} 个`);
+      toast(`🎉 本机数据无损迁移完成: 入站 ${res.summary.inboundsCount} 个，出站 ${res.summary.outboundsCount} 个`);
       load('migrate');
     }
     else if (action === 'preview-xui-json' || action === 'apply-xui-json') {
       const raw = $('#xui-json-input')?.value.trim();
-      if (!raw) { toast('请粘贴 3x-ui JSON 内容', true); return; }
+      if (!raw) { toast('请粘贴配置 JSON 内容', true); return; }
       const mode = $('#migrate-mode')?.value || 'merge';
       const dryRun = action === 'preview-xui-json';
       const res = await api(`/api/migrate/3xui?mode=${mode}&dryRun=${dryRun}`, {
@@ -2646,11 +2650,11 @@ document.addEventListener('click', async (e) => {
       `);
     }
     else if (action === 'cert-acme') {
-      openModal('ACME 自动申请受信任证书 (3x-ui 同款流程)', '签发后自动替换自签证书，并设为面板 HTTPS 与全部 TLS 节点默认证书', `
+      openModal('ACME 自动申请受信任证书', '签发后自动替换自签证书，并设为面板 HTTPS 与全部 TLS 节点默认证书', `
         <form id="cert-acme-form" class="form-grid">
           <label>
             申请域名或公网 IP
-            <input name="domain" placeholder="如 cs.vponlive.com" required>
+            <input name="domain" placeholder="填写已解析到本机的域名" required>
           </label>
           <label>
             通知邮箱 (可选)
@@ -2683,19 +2687,19 @@ document.addEventListener('click', async (e) => {
       `);
     }
     else if (action === 'cert-custom') {
-      openModal('导入或粘贴自定义 SSL 证书', '支持粘贴 PEM 内容或指定服务器已有证书路径 (如 /root/cert/...)', `
+      openModal('导入或粘贴自定义 SSL 证书', '支持粘贴 PEM 内容或指定服务器已有证书路径', `
         <form id="cert-custom-form" class="form-grid">
           <label class="wide">
             域名标识名称
-            <input name="domain" placeholder="如 cs.vponlive.com" required>
+            <input name="domain" placeholder="填写证书对应的域名" required>
           </label>
           <label>
             方式 A: 服务器已有公钥路径 (可选)
-            <input name="certPath" placeholder="/root/cert/cs.vponlive.com/fullchain.pem">
+            <input name="certPath" placeholder="/root/cert/example.com/fullchain.pem">
           </label>
           <label>
             方式 A: 服务器已有私钥路径 (可选)
-            <input name="keyPath" placeholder="/root/cert/cs.vponlive.com/privkey.pem">
+            <input name="keyPath" placeholder="/root/cert/example.com/privkey.pem">
           </label>
           <label class="wide">
             方式 B: 直接粘贴证书公钥内容 (fullchain.pem)

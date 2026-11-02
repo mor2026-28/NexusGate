@@ -74,9 +74,10 @@ bbr_status_text() {
 }
 
 show_info() {
-  echo -e "${cyan}==================== 当前面板配置与访问地址 (3x-ui 风格) ====================${plain}"
-  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --show-info-pretty
-  echo -e "${cyan}=============================================================================${plain}"
+  echo ""
+  echo -e "${cyan}──────────────────────── 当前面板配置与访问地址 ────────────────────────${plain}"
+  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --show-info
+  echo -e "${cyan}────────────────────────────────────────────────────────────────────────${plain}"
 }
 
 cleanup_memory_and_logs() {
@@ -109,7 +110,9 @@ change_account() {
   systemctl stop nexusgate.service 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-account "$u" "$p"
   systemctl start nexusgate.service 2>/dev/null || true
-  ok "管理员账号密码已重置！账号: ${u}  密码: ${p}"
+  echo ""
+  echo -e "${green}  管理员账号 : ${u}${plain}"
+  echo -e "${green}  管理员密码 : ${p}${plain}"
   show_info
 }
 
@@ -123,7 +126,7 @@ change_path() {
   systemctl stop nexusgate.service 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-path "$bp"
   systemctl start nexusgate.service 2>/dev/null || true
-  ok "面板安全访问路径已更新！(单 IP+端口 已禁止访问，请使用下方完整安全路径地址)"
+  ok "面板安全访问路径已更新！(单 IP+端口 已禁止访问，请使用下方完整地址)"
   show_info
 }
 
@@ -166,7 +169,7 @@ ssl_cert_menu() {
   need_root
   while true; do
     echo ""
-    echo -e "${cyan}---------------- SSL 证书管理 (申请后自动设为面板与全部节点默认证书) ----------------${plain}"
+    echo -e "${cyan}──────────────── SSL 证书管理 (申请后自动设为面板与节点默认证书) ────────────────${plain}"
     echo -e "  ${green}1.${plain} 获取 SSL 证书 (ACME 域名 80 端口 HTTP-01 模式，自动绑定面板与节点)"
     echo -e "  ${green}2.${plain} 获取 Let's Encrypt IP 短期证书 (无需域名，直接为公网 IP 签发受信任证书)"
     echo -e "  ${green}3.${plain} 无域名一键生成 10 年自签 SSL 证书 (含公网 IP，自动绑定面板与节点)"
@@ -181,7 +184,7 @@ ssl_cert_menu() {
       1)
         ensure_acme
         local domain="" email="" port80=""
-        read -r -p "请输入已解析到本机的域名 (如 cs.vponlive.com): " domain </dev/tty
+        read -r -p "请输入已解析到本机的域名: " domain </dev/tty
         domain="$(echo "$domain" | tr -d '\r\n ')"
         [[ -n "$domain" ]] || die "域名不能为空"
         read -r -p "请输入通知邮箱 (可留空): " email </dev/tty || true
@@ -247,9 +250,9 @@ ssl_cert_menu() {
         ;;
       6)
         local cf="" kf="" dm=""
-        read -r -p "请输入公钥证书路径 (如 /root/cert/cs.vponlive.com/fullchain.pem): " cf </dev/tty
-        read -r -p "请输入私钥文件路径 (如 /root/cert/cs.vponlive.com/privkey.pem): " kf </dev/tty
-        read -r -p "请输入对应域名标识 (如 cs.vponlive.com): " dm </dev/tty || true
+        read -r -p "请输入公钥证书路径 (如 /root/cert/example.com/fullchain.pem): " cf </dev/tty
+        read -r -p "请输入私钥文件路径 (如 /root/cert/example.com/privkey.pem): " kf </dev/tty
+        read -r -p "请输入对应域名标识: " dm </dev/tty || true
         [[ -f "$cf" && -f "$kf" ]] || die "证书或私钥文件不存在"
         systemctl stop nexusgate.service 2>/dev/null || true
         NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-cert "$cf" "$kf" "$dm"
@@ -278,9 +281,9 @@ ssl_cert_menu() {
 cf_ssl_cert() {
   need_root
   ensure_acme
-  echo -e "${cyan}---------------- Cloudflare DNS API 申请 SSL 证书 ----------------${plain}"
+  echo -e "${cyan}──────────────── Cloudflare DNS API 申请 SSL 证书 ────────────────${plain}"
   local domain="" mode=""
-  read -r -p "请输入要申请的域名 (如 cs.vponlive.com): " domain </dev/tty
+  read -r -p "请输入要申请的域名: " domain </dev/tty
   domain="$(echo "$domain" | tr -d '\r\n ')"
   [[ -n "$domain" ]] || die "域名不能为空"
   echo -e "  ${green}1.${plain} 使用 Cloudflare API Token (推荐，Zone:DNS:Edit 权限)"
@@ -317,9 +320,9 @@ bbr_menu() {
   need_root
   while true; do
     echo ""
-    echo -e "${cyan}---------------- BBR + FQ 与 HY2 UDP 内核加速管理 ----------------${plain}"
+    echo -e "${cyan}──────────────── BBR + FQ 与 HY2 UDP 内核加速管理 ────────────────${plain}"
     echo -e "  当前状态: $(bbr_status_text)"
-    echo -e "  ${green}1.${plain} 启用 BBR + FQ + Hysteria 2 (64MB UDP 缓冲) 全套内核加速 [强烈推荐]"
+    echo -e "  ${green}1.${plain} 启用 BBR + FQ + Hysteria 2 (64MB UDP 缓冲) 全套内核加速 [推荐]"
     echo -e "  ${green}2.${plain} 仅启用 BBR + FQ TCP 拥塞控制加速"
     echo -e "  ${green}3.${plain} 禁用自定义加速 (恢复系统默认配置)"
     echo -e "  ${green}0.${plain} 返回主菜单"
@@ -368,7 +371,7 @@ EOF
 
 firewall_menu() {
   need_root
-  echo -e "${cyan}---------------- 防火墙端口管理 (支持 Debian/Ubuntu/CentOS 全系统) ----------------${plain}"
+  echo -e "${cyan}──────────────── 防火墙端口管理 (支持 Debian/Ubuntu/CentOS) ────────────────${plain}"
   echo -e "  ${green}1.${plain} 一键自动放行面板端口与所有 Sing-box 节点端口"
   echo -e "  ${green}2.${plain} 手动放行指定端口 (TCP + UDP)"
   echo -e "  ${green}3.${plain} 查看当前防火墙状态与监听端口"
@@ -418,8 +421,8 @@ firewall_menu() {
 
 ip_limit_menu() {
   need_root
-  echo -e "${cyan}---------------- IP 与设备数量限制 / Fail2ban 管理 ----------------${plain}"
-  echo -e "  • 节点同时在线公网 IP 数限制 (limitIp) 与同时在线设备数限制 (limitDevice)：可在 Web 面板【入站节点管理 -> 编辑节点】中分别独立设置，超出数量的新连接会被实时自动断开。"
+  echo -e "${cyan}──────────────── IP 与设备数量限制 / Fail2ban 管理 ────────────────${plain}"
+  echo -e "  • 节点同时在线公网 IP 数限制与同时在线设备数限制：可在 Web 面板【入站节点管理 -> 编辑节点】中独立设置。"
   echo -e "  ${green}1.${plain} 安装并启用 SSH 与面板防爆破组件 (Fail2ban)"
   echo -e "  ${green}2.${plain} 查看 Fail2ban 状态"
   echo -e "  ${green}0.${plain} 返回主菜单"
@@ -512,7 +515,6 @@ update_panel() {
   ln -sf /usr/local/bin/nexusgate /usr/local/bin/ng
   rm -rf -- "$tmp" /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
 
-  # Cap journald logs to 64M so 1C-1G-10G servers never run out of disk space
   mkdir -p /etc/systemd/journald.conf.d
   cat > /etc/systemd/journald.conf.d/99-nexusgate.conf <<'EOF'
 [Journal]
@@ -525,13 +527,16 @@ EOF
   journalctl --vacuum-size=32M >/dev/null 2>&1 || true
   systemctl daemon-reload 2>/dev/null || true
 
-  # Trigger cert discovery, Reality config fix, and firewall port opening before restarting
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --issue-selfsigned >/dev/null 2>&1 || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
-  ok "NexusGate 面板与管理脚本已更新至 v2.4，所有节点与 Sing-box 内核已重新加载生效！"
+  ok "NexusGate 面板与管理脚本已更新至 v2.5，所有节点与 Sing-box 内核已重新加载生效！"
   show_info
+  if [[ -r /dev/tty ]]; then
+    pause_return
+    exec /usr/local/bin/nexusgate
+  fi
 }
 
 uninstall_panel() {
@@ -551,13 +556,13 @@ show_menu() {
   clear 2>/dev/null || true
   echo -e "
   ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
-  ${cyan}║${plain}     ${green}NexusGate · 枢门 Sing-box 轻量中转面板管理脚本 (v2.4)${plain}      ${cyan}║${plain}
-  ${cyan}║${plain}     ${yellow}3x-ui 全功能命令体验 · 1C1G10G 防爆满优化 · ACME 证书联动${plain}  ${cyan}║${plain}
+  ${cyan}║${plain}     ${green}NexusGate · 枢门 Sing-box 轻量中转面板管理脚本 (v2.5)${plain}      ${cyan}║${plain}
+  ${cyan}║${plain}     ${yellow}全协议节点编排 · BBR+FQ+HY2 加速 · ACME 证书联动${plain}          ${cyan}║${plain}
   ${cyan}╚════════════════════════════════════════════════════════════════╝${plain}
   ${green}0.${plain} 退出脚本
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ${green}1.${plain} 安装面板
-  ${green}2.${plain} 更新面板 (从 GitHub 拉取最新代码并自动修复重启)
+  ${green}2.${plain} 更新面板 (从 GitHub 拉取最新代码并自动重启生效)
   ${green}3.${plain} 备份 / 导出面板数据
   ${green}4.${plain} 自定义 / 切换 Sing-box 内核版本
   ${green}5.${plain} 卸载面板
@@ -566,7 +571,7 @@ show_menu() {
   ${green}7.${plain} 修改访问路径 (默认生成16位随机安全路径)
   ${green}8.${plain} 重置面板设置 (恢复默认端口与路径)
   ${green}9.${plain} 修改面板端口
-  ${green}10.${plain} 查看当前面板设置 (3x-ui 风格清晰展示完整登录链接/账号/端口)
+  ${green}10.${plain} 查看当前面板设置 (访问链接 / 账号 / 端口 / 订阅地址)
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ${green}11.${plain} 启动面板与 Sing-box
   ${green}12.${plain} 关闭面板与 Sing-box
@@ -586,7 +591,7 @@ show_menu() {
   ${green}23.${plain} 更新 Geo 分流规则文件
   ${green}24.${plain} Speedtest 测速工具
   ${green}25.${plain} 一键无损迁移 3x-ui 全部节点与中转 (x-ui.db / 备份包)
-  ${green}26.${plain} 一键清理系统日志与释放内存 (专为 1C-1G-10G 中转机防爆满优化)
+  ${green}26.${plain} 一键清理系统日志与释放内存
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   面板状态: $(panel_status_text)
   开机启动: $(autostart_status_text)
