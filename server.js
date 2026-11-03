@@ -50,7 +50,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '3.0.0';
+const VERSION = '3.1.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -175,6 +175,20 @@ function syncDiscoveredCerts(force = false) {
   if (hasAnyRealCert && store.state.certificates.some((c) => c.type === 'self-signed' || c.isSelfSigned)) {
     store.state.certificates = store.state.certificates.filter((c) => c.type !== 'self-signed' && !c.isSelfSigned);
     changed = true;
+  }
+
+  // If a backup migration restored a specific certificate (e.g. vm.362353.xyz) and an older version
+  // accidentally bound a different discovered cert, automatically prioritize the migrated certificate once
+  const lastMigDomain = store.state.migrations?.[0]?.restoredCertDomains?.[0] || '';
+  if (lastMigDomain && !store.state.settings._migratedCertHealed && store.state.settings.webDomain !== lastMigDomain) {
+    const migCert = store.state.certificates.find(
+      (c) => c.domain === lastMigDomain && c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false
+    );
+    if (migCert) {
+      store.state.settings._migratedCertHealed = true;
+      bindCertificateEverywhere(store.state, migCert, true, true, true);
+      changed = true;
+    }
   }
 
   const curCertPath = store.state.settings.webCertFile || store.state.settings.defaultCertFile || '';
@@ -2128,8 +2142,15 @@ if (require.main === module) {
     for (const [ip, rec] of loginAttempts.entries()) {
       if (now > rec.resetAt) loginAttempts.delete(ip);
     }
+    if (loginAttempts.size > 2000) loginAttempts.clear();
     store.flushIfDirty();
+    if (typeof global.gc === 'function' && process.memoryUsage().heapUsed > 65 * 1024 * 1024) {
+      try { global.gc(); } catch { /* ignore */ }
+    }
   }, 60000).unref();
+  setInterval(() => {
+    try { cleanupSystemLogsAndMemory(singbox, store); } catch { /* ignore */ }
+  }, 6 * 3600 * 1000).unref();
   setInterval(() => singbox.pollConnectionsAndEnforceLimits().catch(() => {}), 1000).unref();
 
   const gracefulShutdown = () => {

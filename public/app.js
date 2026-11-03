@@ -237,12 +237,6 @@ async function load(page = state.page, options = {}) {
       const data = await api('/api/inbounds');
       if (page !== state.page || seq !== currentLoadSeq) return;
       state.inbounds = data.inbounds || [];
-      if (!state._autoExpandedMultiOnce) {
-        state._autoExpandedMultiOnce = true;
-        for (const inb of state.inbounds) {
-          if ((inb.clients?.length || 0) > 1) state.expandedInbounds.add(inb.id);
-        }
-      }
       state.outbounds = data.outbounds || [];
       state.certificates = data.certificates || [];
       if (data.settings) state.settings = data.settings;
@@ -288,6 +282,7 @@ async function load(page = state.page, options = {}) {
 function setPage(page) {
   const pageChanged = state.page !== page;
   state.page = page;
+  try { sessionStorage.setItem('ng-active-page', page); } catch { /* ignore */ }
   currentLoadSeq += 1;
   if (pageChanged) {
     state.search = '';
@@ -2036,7 +2031,7 @@ function openClientModal(inbound, existingClient = null) {
     <form id="client-form" data-inbound-id="${esc(inbound.id)}" data-client-id="${esc(isEdit ? c.id : '')}" class="form-grid">
       <label>
         客户 / 用户备注名称 (Email / 标识)
-        <input name="email" value="${esc(c.email || '')}" required placeholder="例如: 1558yowe 或 VIP客户A">
+        <input name="email" value="${esc(c.email || '')}" required placeholder="例如: client_01 或 VIP_User">
       </label>
       <label style="flex-direction:row;align-items:center;gap:8px;padding-top:22px">
         <input type="checkbox" name="enable" style="width:18px;min-height:18px" ${c.enable !== false ? 'checked' : ''}>
@@ -3190,7 +3185,14 @@ document.addEventListener('submit', async (e) => {
       $('#login-error').textContent = '';
       state.session = await api('/api/auth/login', { method: 'POST', body: JSON.stringify(data) });
       showApp();
-      setPage('overview');
+      let initialPage = 'overview';
+      try {
+        const savedPage = sessionStorage.getItem('ng-active-page');
+        if (savedPage && ['overview', 'inbounds', 'routing', 'outbounds', 'migrate', 'certificates', 'settings'].includes(savedPage)) {
+          initialPage = savedPage;
+        }
+      } catch { /* ignore */ }
+      setPage(initialPage);
     }
     else if (form.id === 'inbound-form') {
       const id = form.dataset.id;

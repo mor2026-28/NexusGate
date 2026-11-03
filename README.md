@@ -1,6 +1,6 @@
-# NexusGate · 枢门 (v3.0)
+# NexusGate · 枢门 (v3.1)
 
-**NexusGate v3.0** 融合了 **NexusGate** 清爽的明暗双色响应式 UI 与强大的单机/中转节点编排及分流能力，以 **Sing-box** 为唯一轻量底层核心，专为 **低内存、小硬盘 VPS、专线/公网中转机与全协议落地机** 打造。
+**NexusGate v3.1** 融合了 **NexusGate** 清爽的明暗双色响应式 UI 与强大的单机/中转节点编排及分流能力，以 **Sing-box** 为唯一轻量底层核心，专为 **低内存、小硬盘 VPS、专线/公网中转机与全协议落地机** 打造。
 
 - **极致轻量与防爆内存**：零第三方 npm 依赖（纯 Node.js 原生标准库驱动），面板常驻内存仅 **~25 MB**，内置定时日志截断、Systemd Journald 64MB 自动轮转与缓存回收机制。
 - **全协议入站与出站**：原生支持 **VLESS (Reality Vision / TLS / WS / gRPC / HTTPUpgrade)**、**AnyTLS (Sing-box 1.12+)**、**Hysteria 2 (HY2)**、**Shadowsocks (AES-128-GCM / AES-256-GCM / ChaCha20)**、**Shadowsocks 2022 (2022-blake3-aes-128-gcm / 2022-blake3-aes-256-gcm)**、**SOCKS5**、**Trojan**、**VMess**、**TUIC v5** 以及 **Direct 端口转发 (隧道中转)**。
