@@ -50,7 +50,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '3.1.0';
+const VERSION = '3.2.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -782,7 +782,7 @@ function enrichInboundWithLinks(inbound, reqHost = '') {
 function autoApplyIfEnabled() {
   if (store.state.settings.autoApplyConfig !== false) {
     try {
-      singbox.restart();
+      singbox.reloadIfChanged();
     } catch {
       singbox.writeConfig();
     }
@@ -2109,9 +2109,10 @@ function startPanelServer(callback) {
   server.listen(port, host, () => {
     console.log(`[NexusGate · 枢门 v${VERSION}] 面板已启动: ${proto}://${host}:${port}${basePath === '/' ? '/' : `${basePath}/`}`);
     try {
-      singbox.writeConfig();
       if (fs.existsSync(singbox.getBinPath())) {
-        singbox.restart();
+        singbox.reloadIfChanged();
+      } else {
+        singbox.writeConfig();
       }
     } catch (err) {
       console.warn('[NexusGate] 初始化写入 Sing-box 配置提示:', err.message);

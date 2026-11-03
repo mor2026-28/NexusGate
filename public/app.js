@@ -4,9 +4,27 @@ const BASE_PATH = (window.__NG_BASE_PATH__ && window.__NG_BASE_PATH__ !== '/')
   ? window.__NG_BASE_PATH__.replace(/\/+$/, '')
   : '';
 
+const VALID_PAGES = ['overview', 'inbounds', 'routing', 'outbounds', 'migrate', 'certificates', 'settings'];
+
+function getSavedInitialPage() {
+  try {
+    const hashPage = (window.location.hash || '').replace(/^#\/?/, '').trim();
+    if (VALID_PAGES.includes(hashPage)) return hashPage;
+  } catch { /* ignore */ }
+  try {
+    const sessPage = sessionStorage.getItem('ng-active-page');
+    if (sessPage && VALID_PAGES.includes(sessPage)) return sessPage;
+  } catch { /* ignore */ }
+  try {
+    const localPage = localStorage.getItem('ng-active-page');
+    if (localPage && VALID_PAGES.includes(localPage)) return localPage;
+  } catch { /* ignore */ }
+  return 'overview';
+}
+
 const state = {
   session: null,
-  page: 'overview',
+  page: getSavedInitialPage(),
   search: '',
   protoFilter: 'all',
   overview: null,
@@ -280,9 +298,17 @@ async function load(page = state.page, options = {}) {
 }
 
 function setPage(page) {
-  const pageChanged = state.page !== page;
-  state.page = page;
-  try { sessionStorage.setItem('ng-active-page', page); } catch { /* ignore */ }
+  const targetPage = VALID_PAGES.includes(page) ? page : 'overview';
+  const pageChanged = state.page !== targetPage;
+  state.page = targetPage;
+  page = targetPage;
+  try { sessionStorage.setItem('ng-active-page', targetPage); } catch { /* ignore */ }
+  try { localStorage.setItem('ng-active-page', targetPage); } catch { /* ignore */ }
+  try {
+    if (window.location.hash !== `#${targetPage}`) {
+      history.replaceState(null, '', `#${targetPage}`);
+    }
+  } catch { /* ignore */ }
   currentLoadSeq += 1;
   if (pageChanged) {
     state.search = '';
@@ -3185,14 +3211,7 @@ document.addEventListener('submit', async (e) => {
       $('#login-error').textContent = '';
       state.session = await api('/api/auth/login', { method: 'POST', body: JSON.stringify(data) });
       showApp();
-      let initialPage = 'overview';
-      try {
-        const savedPage = sessionStorage.getItem('ng-active-page');
-        if (savedPage && ['overview', 'inbounds', 'routing', 'outbounds', 'migrate', 'certificates', 'settings'].includes(savedPage)) {
-          initialPage = savedPage;
-        }
-      } catch { /* ignore */ }
-      setPage(initialPage);
+      setPage(getSavedInitialPage());
     }
     else if (form.id === 'inbound-form') {
       const id = form.dataset.id;
@@ -3410,7 +3429,13 @@ $('#sidebar-scrim')?.addEventListener('click', () => $('#app').classList.remove(
     if (sess.authenticated) {
       state.session = sess;
       showApp();
-      setPage('overview');
+      setPage(getSavedInitialPage());
+      if (state.page !== 'overview') {
+        api('/api/overview').then((ov) => {
+          state.overview = ov;
+          updateSidebarIndicator();
+        }).catch(() => {});
+      }
     } else {
       showLogin();
     }

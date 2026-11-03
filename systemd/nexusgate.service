@@ -8,11 +8,11 @@ StartLimitIntervalSec=0
 Type=simple
 EnvironmentFile=-/etc/nexusgate/nexusgate.env
 WorkingDirectory=/opt/nexusgate
-ExecStart=/usr/bin/node --expose-gc --max-old-space-size=128 /opt/nexusgate/server.js
+ExecStart=/usr/bin/node --expose-gc --max-old-space-size=192 /opt/nexusgate/server.js
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576
-MemoryMax=180M
+MemoryMax=384M
 
 [Install]
 WantedBy=multi-user.target

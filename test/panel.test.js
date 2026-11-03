@@ -703,3 +703,54 @@ conn.close()
     await new Promise((r) => mockClash.close(r));
   }
 });
+
+test('9. Zero-disruption cleanup & config diffing: memory cleanup never double-counts active connections or drops nodes', async () => {
+  // 1. Verify writeConfig() diffing reports changed: false when config is identical
+  const w1 = singbox.writeConfig();
+  const w2 = singbox.writeConfig();
+  assert.equal(w2.changed, false, 'Identical Sing-box config must report changed: false to avoid unnecessary restarts');
+
+  // 2. Verify cleanupSystemLogsAndMemory never clears connTrafficCache of active connections (preventing false quota exhaustion)
+  const targetInb = store.state.inbounds.find((i) => i.port === 55011);
+  assert.ok(targetInb);
+  const beforeUp = targetInb.up;
+
+  let activeConns = [
+    {
+      id: 'long-lived-conn-1',
+      start: new Date().toISOString(),
+      metadata: { network: 'tcp', type: 'vless/inbound-55011', user: 'client_alpha', sourceIP: '198.18.0.1', sourcePort: '41000' },
+      upload: 50000,
+      download: 100000,
+      chains: ['direct']
+    }
+  ];
+
+  const mockClash = http.createServer((reqM, resM) => {
+    if (reqM.method === 'GET' && reqM.url === '/connections') {
+      resM.writeHead(200, { 'content-type': 'application/json' });
+      resM.end(JSON.stringify({ connections: activeConns }));
+    } else {
+      resM.writeHead(204);
+      resM.end();
+    }
+  });
+  await new Promise((r) => mockClash.listen(0, '127.0.0.1', r));
+  store.state.settings.clashApiPort = mockClash.address().port;
+
+  try {
+    const nowMs = Date.now();
+    await singbox.pollConnectionsAndEnforceLimits(new Date(nowMs));
+    assert.equal(targetInb.up - beforeUp, 50000);
+
+    // Trigger system memory & log cleanup while long-lived-conn-1 is still active
+    const cleanRes = await req('/SecPath16Chars99/api/system/cleanup', { method: 'POST' });
+    assert.equal(cleanRes.status, 200);
+
+    // Poll again with the same cumulative upload=50000: deltaUp MUST be 0 (not double-counted as +50000!)
+    await singbox.pollConnectionsAndEnforceLimits(new Date(nowMs + 2000));
+    assert.equal(targetInb.up - beforeUp, 50000, 'Active connection traffic must NOT be double-counted after memory cleanup');
+  } finally {
+    await new Promise((r) => mockClash.close(r));
+  }
+});
