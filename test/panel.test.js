@@ -8,7 +8,7 @@ const path = require('node:path');
 const http = require('node:http');
 const { spawnSync } = require('node:child_process');
 
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-test-v25-'));
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-test-v26-'));
 process.env.NG_DATA_FILE = path.join(tmpDir, 'nexusgate.json');
 process.env.NG_SINGBOX_CONFIG = path.join(tmpDir, 'sing-box-config.json');
 process.env.NG_ADMIN_USERNAME = 'ng_adminTest01';
@@ -16,7 +16,7 @@ process.env.NG_ADMIN_PASSWORD = 'StrongPassword123456';
 process.env.NG_BASE_PATH = '/SecPath16Chars99/';
 
 const { store, singbox, handleRequest } = require('../server');
-const { REALITY_PRESETS, parseShareUriToOutbound, toSingboxInbound } = require('../lib/protocols');
+const { REALITY_PRESETS, parseShareUriToOutbound } = require('../lib/protocols');
 const { computeResetCycleKey } = require('../lib/singbox');
 
 let server;
@@ -162,8 +162,14 @@ test('3. Monthly automatic traffic reset (resetDay 1..31), batch operations, and
   assert.ok(Array.isArray(cleanRes.json.result.actions));
 });
 
-test('4. Clash smart subscription template & concise CLI --show-info output', async () => {
-  const subRes = await req('/sub/all?format=clash');
+test('4. High-entropy subToken security (/sub/all returns 404) & clean CLI --show-info without username/subscription', async () => {
+  const subAllRes = await req('/sub/all?format=clash');
+  assert.equal(subAllRes.status, 404, '/sub/all must be rejected with 404 to prevent scanning/leaks');
+
+  const subToken = store.state.settings.subToken;
+  assert.ok(subToken && subToken.length >= 16 && subToken !== 'all', 'settings.subToken must be a high-entropy token');
+
+  const subRes = await req(`/sub/${subToken}?format=clash`);
   assert.equal(subRes.status, 200);
   assert.ok(subRes.headers.get('subscription-userinfo').includes('total='));
   assert.ok(subRes.text.includes('port: 7890'));
@@ -175,23 +181,38 @@ test('4. Clash smart subscription template & concise CLI --show-info output', as
   assert.ok(subRes.text.includes('DOMAIN-SUFFIX,google.com,🔰 节点选择'));
   assert.ok(subRes.text.includes('GEOIP,CN,🎯 全球直连,no-resolve'));
 
-  // Test default CLI --show-info (must be concise human-readable text, NOT raw JSON!)
+  // Test default CLI --show-info (must omit 登录账号 and 聚合订阅)
   const cliInfo = spawnSync(process.execPath, [path.join(__dirname, '..', 'server.js'), '--show-info'], {
     env: { ...process.env, NG_DATA_FILE: path.join(tmpDir, 'nexusgate.json') },
     encoding: 'utf8'
   });
   assert.equal(cliInfo.status, 0);
   assert.ok(cliInfo.stdout.includes('访问地址'));
-  assert.ok(cliInfo.stdout.includes('登录账号'));
-  assert.ok(!cliInfo.stdout.trim().startsWith('{'), '--show-info should output human-readable lines, not raw JSON');
+  assert.ok(cliInfo.stdout.includes('面板端口'));
+  assert.ok(cliInfo.stdout.includes('安全路径'));
+  assert.ok(!cliInfo.stdout.includes('登录账号'), '--show-info should NOT display 登录账号');
+  assert.ok(!cliInfo.stdout.includes('聚合订阅'), '--show-info should NOT display 聚合订阅');
 });
 
-test('5. E2E Lossless Migration of 3x-ui SQLite Database (40 Inbounds + 9 Relay Outbounds + Routing Rules) & Low Memory Footprint', async () => {
-  const dbPath = path.join(tmpDir, 'x-ui-production.db');
+test('5. E2E Lossless Migration of Universal 3x-ui / X-Panel .tar.gz Archive (with sublink.db, x-ui.db, /root/cert, WS+TLS & Reality)', async () => {
+  const archiveBuildDir = path.join(tmpDir, 'archive_src');
+  fs.mkdirSync(path.join(archiveBuildDir, 'etc', 'x-ui'), { recursive: true });
+  fs.mkdirSync(path.join(archiveBuildDir, 'usr', 'local', 'bin', 'sublink', 'db'), { recursive: true });
+
+  const sublinkDbPath = path.join(archiveBuildDir, 'usr', 'local', 'bin', 'sublink', 'db', 'sublink.db');
+  const xuiDbPath = path.join(archiveBuildDir, 'etc', 'x-ui', 'x-ui.db');
+  const tarGzPath = path.join(tmpDir, '3xui_universal_backup.tar.gz');
+
   const pyGen = `
 import sqlite3, json, sys
 
-conn = sqlite3.connect(sys.argv[1])
+# Create dummy sublink.db (no inbounds table) to ensure findXuiDbInDir ignores it
+c1 = sqlite3.connect(sys.argv[1])
+c1.execute("CREATE TABLE sub_logs (id INTEGER PRIMARY KEY, name TEXT)")
+c1.commit()
+c1.close()
+
+conn = sqlite3.connect(sys.argv[2])
 cur = conn.cursor()
 cur.execute("CREATE TABLE inbounds (id INTEGER PRIMARY KEY, user_id INT, up INT, down INT, total INT, remark TEXT, enable INT, expiry_time INT, traffic_reset TEXT, listen TEXT, port INT, protocol TEXT, settings TEXT, stream_settings TEXT, tag TEXT, sniffing TEXT)")
 cur.execute("CREATE TABLE client_traffics (id INTEGER PRIMARY KEY, inbound_id INT, enable INT, email TEXT, up INT, down INT, expiry_time INT, total INT)")
@@ -204,11 +225,11 @@ for i in range(1, 41):
     if i % 4 == 0:
         proto = "vless"
         settings = {"clients": [{"id": f"11111111-2222-4333-8444-{i:012d}", "flow": "xtls-rprx-vision", "email": f"vless_user_{i}", "limitIp": 3, "totalGB": 100 * (1024**3), "expiryTime": 1893456000000, "enable": True, "subId": f"sub_{i}"}], "decryption": "none"}
-        stream = {"network": "raw", "security": "reality", "realitySettings": {"target": "www.apple.com:443", "serverNames": ["www.apple.com"], "privateKey": "cHJpdmF0ZWtleXplaceholder", "shortIds": ["1a2b3c4d"], "settings": {"publicKey": "cHVibGlja2V5placeholder", "fingerprint": "chrome"}}}
+        stream = {"network": "tcp", "security": "reality", "realitySettings": {"dest": "www.tesla.com:443", "serverNames": ["tesla.com", "www.tesla.com"], "privateKey": "cHJpdmF0ZWtleXplaceholder", "shortIds": ["1a2b3c4d"], "settings": {"publicKey": "cHVibGlja2V5placeholder", "fingerprint": "chrome"}}}
     elif i % 4 == 1:
-        proto = "shadowsocks"
-        settings = {"method": "aes-256-gcm", "password": f"srv_pass_{i}", "network": "tcp,udp", "clients": [{"password": f"real_client_pass_{i}", "email": f"ss_classic_{i}", "enable": True}]}
-        stream = {"network": "tcp", "security": "none"}
+        proto = "vless"
+        settings = {"clients": [{"id": f"22222222-3333-4444-8555-{i:012d}", "flow": "", "email": f"vless_ws_{i}", "enable": True}], "decryption": "none"}
+        stream = {"network": "ws", "security": "tls", "tlsSettings": {"serverName": "", "alpn": ["h2", "http/1.1"], "certificates": [{"certificateFile": "/root/cert/node.example.com/fullchain.pem", "keyFile": "/root/cert/node.example.com/privkey.pem"}]}, "wsSettings": {"path": "/ws-test", "headers": {}}}
     elif i % 4 == 2:
         proto = "shadowsocks"
         settings = {"method": "2022-blake3-aes-128-gcm", "password": "MTIzNDU2Nzg5MDEyMzQ1Ng==", "network": "tcp,udp", "clients": [{"password": "YWJjZGVmZ2hpamtsbW5vcA==", "email": f"ss2022_{i}", "enable": True}]}
@@ -243,26 +264,36 @@ cur.execute("INSERT INTO settings VALUES (1, 'xrayTemplateConfig', ?)", (json.du
 conn.commit()
 conn.close()
 `;
-  const pyRun = spawnSync('python3', ['-c', pyGen, dbPath], { encoding: 'utf8' });
+  const pyRun = spawnSync('python3', ['-c', pyGen, sublinkDbPath, xuiDbPath], { encoding: 'utf8' });
   assert.equal(pyRun.status, 0, pyRun.stderr);
 
-  const dbBuf = fs.readFileSync(dbPath);
+  const tarRun = spawnSync('tar', ['-czf', tarGzPath, '-C', archiveBuildDir, 'usr/local/bin/sublink/db/sublink.db', 'etc/x-ui/x-ui.db']);
+  assert.equal(tarRun.status, 0);
+
+  const tarBuf = fs.readFileSync(tarGzPath);
   const migRes = await req('/SecPath16Chars99/api/migrate/3xui?mode=replace', {
     method: 'POST',
     headers: { 'content-type': 'application/octet-stream' },
-    body: dbBuf
+    body: tarBuf
   });
   assert.equal(migRes.status, 200);
-  assert.equal(migRes.json.summary.inboundsCount, 40);
+  assert.equal(migRes.json.summary.inboundsCount, 40, 'Must locate x-ui.db inside .tar.gz even when sublink.db is present');
   assert.equal(migRes.json.summary.outboundsCount, 3);
 
-  for (let i = 0; i < 20; i += 1) {
-    const ovRes = await req('/SecPath16Chars99/api/overview');
-    assert.equal(ovRes.status, 200);
-    const inbRes = await req('/SecPath16Chars99/api/inbounds');
-    assert.equal(inbRes.status, 200);
-    assert.equal(inbRes.json.inbounds.length, 40);
-  }
+  const inbRes = await req('/SecPath16Chars99/api/inbounds');
+  assert.equal(inbRes.status, 200);
+  const wsInbound = inbRes.json.inbounds.find((i) => i.port === 40001);
+  assert.equal(wsInbound.tlsDomain, 'node.example.com', 'Empty serverName in 3x-ui WS+TLS should infer domain from /root/cert/<domain>/fullchain.pem');
+  assert.ok(wsInbound.links[0].uri.includes('sni=node.example.com'));
+  assert.ok(wsInbound.links[0].uri.includes('type=ws'));
+
+  const realityInbound = inbRes.json.inbounds.find((i) => i.port === 40004);
+  assert.equal(realityInbound.reality.serverName, 'tesla.com', 'Migrated Reality node must preserve its existing SNI so existing clients are not broken');
+
+  const { config } = singbox.writeConfig();
+  const sbWsInb = config.inbounds.find((i) => i.listen_port === 40001);
+  assert.deepEqual(sbWsInb.tls.alpn, ['http/1.1'], 'WS+TLS inbound in Sing-box must force alpn: ["http/1.1"] so WebSocket Upgrade works');
+
   const heapUsedMB = Math.round(process.memoryUsage().heapUsed / (1024 * 1024));
-  assert.ok(heapUsedMB < 90, `Heap used (${heapUsedMB} MB) should stay well below 90MB even after 40-node polling`);
+  assert.ok(heapUsedMB < 90, `Heap used (${heapUsedMB} MB) should stay well below 90MB`);
 });

@@ -42,24 +42,24 @@ detect_arch() {
 }
 
 install_dependencies() {
-  info "正在检查并安装轻量系统依赖 (curl, tar, openssl, sqlite3, python3, nodejs)..."
+  info "正在检查并安装轻量系统依赖 (curl, tar, openssl, sqlite3, python3, cron, nodejs)..."
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq || true
-    apt-get install -y -qq ca-certificates curl tar openssl sqlite3 python3
+    apt-get install -y -qq ca-certificates curl tar openssl sqlite3 python3 cron socat
     if ! command -v node >/dev/null 2>&1 || (( $(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0) < 18 )); then
       info "安装 Node.js 20 LTS 运行时..."
       curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 || true
       apt-get install -y -qq nodejs
     fi
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y -q ca-certificates curl tar openssl sqlite python3 nodejs
+    dnf install -y -q ca-certificates curl tar openssl sqlite python3 cronie socat nodejs
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y -q ca-certificates curl tar openssl sqlite python3 nodejs
+    yum install -y -q ca-certificates curl tar openssl sqlite python3 cronie socat nodejs
   elif command -v apk >/dev/null 2>&1; then
-    apk update && apk add --no-cache ca-certificates curl tar openssl sqlite python3 nodejs
+    apk update && apk add --no-cache ca-certificates curl tar openssl sqlite python3 dcron socat nodejs
   elif command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm ca-certificates curl tar openssl sqlite python nodejs
+    pacman -Sy --noconfirm ca-certificates curl tar openssl sqlite python cronie socat nodejs
   fi
 
   command -v node >/dev/null 2>&1 || die "Node.js 安装失败，请先安装 Node.js >= 18"
@@ -212,11 +212,16 @@ PY
     warn "检测到本机已存在 3x-ui 数据 (${found_xui})！"
     local do_mig="y"
     if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
-      read -r -p "是否立即无损迁移 3x-ui 全部入站节点、中转出站与分流规则？[Y/n]: " do_mig </dev/tty || true
+      read -r -p "是否立即无损迁移 3x-ui 全部入站节点、中转出站、分流规则与证书？[Y/n]: " do_mig </dev/tty || true
     fi
     if [[ "${do_mig:-y}" =~ ^[Yy]?$ ]]; then
       NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --migrate-3xui "$found_xui" merge || warn "自动迁移可在登录面板后通过【3x-ui 无损迁移】页面操作"
     fi
+  fi
+
+  if [[ -x /root/.acme.sh/acme.sh ]]; then
+    /root/.acme.sh/acme.sh --install-cronjob >/dev/null 2>&1 || true
+    systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null || true
   fi
 
   NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
@@ -247,7 +252,7 @@ PY
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.5 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.6 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
   echo -e " 访问地址   : ${cyan}${login_url}${plain}"
   echo -e " 登录账号   : ${green}${admin_user}${plain}"

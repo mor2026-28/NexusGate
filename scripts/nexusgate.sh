@@ -163,6 +163,8 @@ ensure_acme() {
   fi
   ~/.acme.sh/acme.sh --upgrade --auto-upgrade >/dev/null 2>&1 || true
   ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+  ~/.acme.sh/acme.sh --install-cronjob >/dev/null 2>&1 || true
+  systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null || true
 }
 
 ssl_cert_menu() {
@@ -491,10 +493,14 @@ migrate_3xui() {
   local default_db="/etc/x-ui/x-ui.db"
   [[ ! -f "$default_db" && -f /root/3xui_backup.tar.gz ]] && default_db="/root/3xui_backup.tar.gz"
   local db_path=""
-  read -r -p "请输入 3x-ui 数据库或备份包路径 [默认 ${default_db}]: " db_path </dev/tty || true
+  read -r -p "请输入 3x-ui 数据库或通用备份包路径 [默认 ${default_db}]: " db_path </dev/tty || true
   db_path="${db_path:-$default_db}"
   systemctl stop nexusgate.service 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --migrate-3xui "$db_path" merge
+  if [[ -x /root/.acme.sh/acme.sh ]]; then
+    /root/.acme.sh/acme.sh --install-cronjob >/dev/null 2>&1 || true
+    systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null || true
+  fi
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
@@ -527,11 +533,15 @@ EOF
   journalctl --vacuum-size=32M >/dev/null 2>&1 || true
   systemctl daemon-reload 2>/dev/null || true
 
+  if [[ -x /root/.acme.sh/acme.sh ]]; then
+    /root/.acme.sh/acme.sh --install-cronjob >/dev/null 2>&1 || true
+  fi
+
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --issue-selfsigned >/dev/null 2>&1 || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
-  ok "NexusGate 面板与管理脚本已更新至 v2.5，所有节点与 Sing-box 内核已重新加载生效！"
+  ok "NexusGate 面板与管理脚本已更新至 v2.6，所有节点与 Sing-box 内核已重新加载生效！"
   show_info
   if [[ -r /dev/tty ]]; then
     pause_return
@@ -556,7 +566,7 @@ show_menu() {
   clear 2>/dev/null || true
   echo -e "
   ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
-  ${cyan}║${plain}     ${green}NexusGate · 枢门 Sing-box 轻量中转面板管理脚本 (v2.5)${plain}      ${cyan}║${plain}
+  ${cyan}║${plain}     ${green}NexusGate · 枢门 Sing-box 轻量中转面板管理脚本 (v2.6)${plain}      ${cyan}║${plain}
   ${cyan}║${plain}     ${yellow}全协议节点编排 · BBR+FQ+HY2 加速 · ACME 证书联动${plain}          ${cyan}║${plain}
   ${cyan}╚════════════════════════════════════════════════════════════════╝${plain}
   ${green}0.${plain} 退出脚本
@@ -571,7 +581,7 @@ show_menu() {
   ${green}7.${plain} 修改访问路径 (默认生成16位随机安全路径)
   ${green}8.${plain} 重置面板设置 (恢复默认端口与路径)
   ${green}9.${plain} 修改面板端口
-  ${green}10.${plain} 查看当前面板设置 (访问链接 / 账号 / 端口 / 订阅地址)
+  ${green}10.${plain} 查看当前面板配置与访问地址 (端口 / 安全路径 / 证书 / 节点统计)
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ${green}11.${plain} 启动面板与 Sing-box
   ${green}12.${plain} 关闭面板与 Sing-box
@@ -590,7 +600,7 @@ show_menu() {
   ${green}22.${plain} 启用 BBR + FQ / HY2 UDP 高速内核加速
   ${green}23.${plain} 更新 Geo 分流规则文件
   ${green}24.${plain} Speedtest 测速工具
-  ${green}25.${plain} 一键无损迁移 3x-ui 全部节点与中转 (x-ui.db / 备份包)
+  ${green}25.${plain} 一键无损迁移 3x-ui 全部节点与中转 (x-ui.db / 通用备份包)
   ${green}26.${plain} 一键清理系统日志与释放内存
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   面板状态: $(panel_status_text)

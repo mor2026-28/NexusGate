@@ -49,7 +49,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '2.5.0';
+const VERSION = '2.6.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -218,7 +218,7 @@ function getPanelInfoSummary() {
   const base = normalizeBasePath(s.webBasePath);
   const cleanUrl = `${proto}://${host}:${s.webPort}${base === '/' ? '/' : `${base}/`}`;
   const subPath = (s.subPath || '/sub/').replace(/\/+$/, '');
-  const subUrl = `${proto}://${host}:${s.webPort}${subPath}/all`;
+  const subUrl = `${proto}://${host}:${s.webPort}${subPath}/${s.subToken || ''}`;
   return {
     version: VERSION,
     username: store.state.admin.username,
@@ -246,11 +246,9 @@ function printPrettyPanelInfo() {
   const r = '\x1b[0m';
   console.log(`  面板版本   : ${g}v${info.version}${r}`);
   console.log(`  访问地址   : ${c}${info.url}${r}`);
-  console.log(`  登录账号   : ${g}${info.username}${r}`);
   console.log(`  面板端口   : ${y}${info.port}${r}`);
   console.log(`  安全路径   : ${y}${info.basePath}${r}`);
   console.log(`  SSL 状态   : ${info.https ? `${g}已开启 (${info.defaultNodeTlsDomain})${r}` : `${y}未开启 (HTTP)${r}`}`);
-  console.log(`  聚合订阅   : ${c}${info.subUrl}${r}`);
   console.log(`  节点统计   : 入站 ${c}${info.inboundsCount}${r} 个 | 出站 ${c}${info.outboundsCount}${r} 个 | 转发规则 ${c}${info.rulesCount}${r} 条`);
   console.log(`────────────────────────────────────────────────────────────────`);
   console.log(`  ${y}提示: 如需重置账号密码，请在菜单中输入 6${r}`);
@@ -317,6 +315,7 @@ function handleCliCommand(args) {
       st.settings = {
         ...def,
         publicIPv4: st.settings.publicIPv4 || '',
+        subToken: st.settings.subToken || def.subToken,
         webPort: 2053,
         webBasePath: '/',
         strictBasePath: true
@@ -378,10 +377,12 @@ function handleCliCommand(args) {
   if (cmd === '--migrate-3xui') {
     const dbPath = args[1] || '/etc/x-ui/x-ui.db';
     const mode = args[2] || 'merge';
-    const parsed = parse3xuiPayload({ dbPath });
+    const parsed = parse3xuiPayload({ dbPath, dryRun: false });
     const rec = apply3xuiMigration(store, parsed, mode);
+    syncDiscoveredCerts();
     singbox.writeConfig();
-    console.log(`成功从 ${dbPath} 无损迁移: 入站 ${rec.inboundsCount} 个 (${rec.clientsCount} 客户端), 出站 ${rec.outboundsCount} 个, 分流规则 ${rec.rulesCount} 条`);
+    const certMsg = rec.restoredCertsCount ? `, 恢复证书 ${rec.restoredCertsCount} 张 (${rec.restoredCertDomains.join(', ')})` : '';
+    console.log(`成功从 ${dbPath} 无损迁移: 入站 ${rec.inboundsCount} 个 (${rec.clientsCount} 客户端), 出站 ${rec.outboundsCount} 个, 分流规则 ${rec.rulesCount} 条${certMsg}`);
     return;
   }
 }
@@ -547,7 +548,7 @@ function normalizeInboundPayload(body, existing = null) {
       username: String(c.username || c.email || `user_${i + 1}`).trim(),
       password: String(c.password || inbound.password || inbound.socksPassword || randomString(18)).trim(),
       flow: c.flow !== undefined ? c.flow : (inbound.flow || ''),
-      subId: String(c.subId || randomString(12)).trim(),
+      subId: String(c.subId || randomString(16)).trim(),
       limitIp: Number(c.limitIp ?? inbound.limitIp ?? 0),
       limitDevice: Number(c.limitDevice ?? inbound.limitDevice ?? 0),
       totalGB: Number(c.totalGB || totalGB || 0),
@@ -578,7 +579,7 @@ function normalizeInboundPayload(body, existing = null) {
         username: inbound.socksUser || `user_${randomString(6)}`,
         password: inbound.password || inbound.socksPassword || randomString(18),
         flow: inbound.flow || '',
-        subId: randomString(12),
+        subId: randomString(16),
         limitIp: inbound.limitIp,
         limitDevice: inbound.limitDevice,
         totalGB,
@@ -703,6 +704,11 @@ async function handleRequest(req, res) {
         const fmt = url.searchParams.get('format')
           || (ua.includes('clash') || ua.includes('mihomo') || ua.includes('stash') ? 'clash' : (ua.includes('sing-box') || ua.includes('sfi') ? 'singbox' : 'base64'));
         const output = formatSubscription(store.state, subMatch.token, fmt, reqHostHeader);
+        if (!output) {
+          res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+          res.end('404 Not Found');
+          return;
+        }
         res.writeHead(200, {
           'content-type': output.contentType,
           'profile-update-interval': '12',
@@ -1419,7 +1425,7 @@ async function handleRequest(req, res) {
 
       if (contentType.includes('application/octet-stream')) {
         const dbBuffer = await readBuffer(req, 64 * 1024 * 1024);
-        parsed = parse3xuiPayload({ dbBuffer });
+        parsed = parse3xuiPayload({ dbBuffer, dryRun });
       } else {
         const body = await readJson(req);
         if (body.source === 'local') {
@@ -1427,12 +1433,12 @@ async function handleRequest(req, res) {
           if (!fs.existsSync(localPath) && fs.existsSync('/root/3xui_backup.tar.gz')) {
             localPath = '/root/3xui_backup.tar.gz';
           }
-          parsed = parse3xuiPayload({ dbPath: localPath });
+          parsed = parse3xuiPayload({ dbPath: localPath, dryRun });
         } else if (body.dbBase64) {
           const dbBuffer = Buffer.from(body.dbBase64, 'base64');
-          parsed = parse3xuiPayload({ dbBuffer });
+          parsed = parse3xuiPayload({ dbBuffer, dryRun });
         } else if (body.jsonPayload) {
-          parsed = parse3xuiPayload({ jsonPayload: typeof body.jsonPayload === 'string' ? JSON.parse(body.jsonPayload) : body.jsonPayload });
+          parsed = parse3xuiPayload({ jsonPayload: typeof body.jsonPayload === 'string' ? JSON.parse(body.jsonPayload) : body.jsonPayload, dryRun });
         } else {
           throw new Error('请上传 x-ui.db / 3xui_backup.tar.gz 文件、选择本机路径或粘贴 3x-ui JSON 配置');
         }
@@ -1442,15 +1448,20 @@ async function handleRequest(req, res) {
         return sendJson(res, 200, { preview: true, ...parsed });
       }
 
+      const prevPanelCert = store.state.settings.webCertFile || '';
       const record = apply3xuiMigration(store, parsed, mode);
+      syncDiscoveredCerts();
       store.transact(() => store.addAudit(
         session.username,
         'migrate_3xui',
-        `入站 ${record.inboundsCount} 个 / 出站 ${record.outboundsCount} 个 / 规则 ${record.rulesCount} 条`
+        `入站 ${record.inboundsCount} 个 / 出站 ${record.outboundsCount} 个 / 规则 ${record.rulesCount} 条${record.restoredCertsCount ? ` / 证书 ${record.restoredCertsCount} 张` : ''}`
       ));
       const allPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
       openFirewallPorts(allPorts);
       autoApplyIfEnabled();
+      if (store.state.settings.webCertFile && store.state.settings.webCertFile !== prevPanelCert) {
+        setTimeout(() => restartPanelServer(), 300);
+      }
       return sendJson(res, 200, {
         migrated: true,
         record,
@@ -1586,7 +1597,7 @@ async function handleRequest(req, res) {
     // 14. Panel Security & Settings
     if (pathname === '/api/settings' && method === 'GET') {
       syncDiscoveredCerts();
-      const subItems = collectSubscriptionItems(store.state, 'all', reqHostHeader);
+      const subItems = collectSubscriptionItems(store.state, store.state.settings.subToken, reqHostHeader);
       return sendJson(res, 200, {
         settings: store.state.settings,
         admin: { username: store.state.admin.username, updatedAt: store.state.admin.updatedAt },
@@ -1637,6 +1648,10 @@ async function handleRequest(req, res) {
         }
         if (body.subEnable !== undefined) s.subEnable = Boolean(body.subEnable);
         if (body.subPath !== undefined) s.subPath = normalizeBasePath(body.subPath);
+        if (body.subToken !== undefined) {
+          const cleaned = String(body.subToken).trim().replace(/[^a-zA-Z0-9_-]/g, '');
+          s.subToken = (cleaned && cleaned !== 'all' && cleaned.length >= 12) ? cleaned : randomString(20);
+        }
         if (body.singboxBin !== undefined) s.singboxBin = String(body.singboxBin).trim();
         if (body.singboxLogLevel !== undefined) s.singboxLogLevel = String(body.singboxLogLevel).trim();
         if (body.autoApplyConfig !== undefined) s.autoApplyConfig = Boolean(body.autoApplyConfig);

@@ -224,6 +224,7 @@ async function load(page = state.page) {
     } else if (page === 'migrate') {
       const [ov, st] = await Promise.all([api('/api/overview'), api('/api/settings')]);
       state.overview = ov;
+      state.settings = st.settings || state.settings;
       state.migrations = st.migrations || [];
     } else if (page === 'certificates') {
       const [certs, st, inbData] = await Promise.all([api('/api/certificates'), api('/api/settings'), api('/api/inbounds')]);
@@ -261,13 +262,14 @@ function setPage(page) {
   load(page);
 }
 
-function getBaseSubscriptionUrl(subToken = 'all') {
+function getBaseSubscriptionUrl(subToken = '') {
   const s = state.settings || {};
+  const token = (subToken && subToken !== 'all') ? subToken : (s.subToken || '');
   const proto = window.location.protocol;
   const host = s.webDomain || window.location.hostname || s.publicIPv4 || '127.0.0.1';
   const portPart = window.location.port ? `:${window.location.port}` : (s.webPort ? `:${s.webPort}` : '');
   const subPath = (s.subPath || '/sub/').replace(/\/+$/, '');
-  return `${proto}//${host}${portPart}${subPath}/${encodeURIComponent(subToken)}`;
+  return `${proto}//${host}${portPart}${subPath}/${encodeURIComponent(token)}`;
 }
 
 /* ==================== RENDER PAGES ==================== */
@@ -312,7 +314,7 @@ function renderOverview() {
   return `
     ${ov.local3xuiExists ? `
       <div class="notice" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-        <div><b>检测到本机存在 3x-ui 数据 (/etc/x-ui/x-ui.db 或 /root/3xui_backup.tar.gz)</b> · 可一键无损迁移全部入站节点、客户端凭据、路由转发与中转出站，不影响现有客户连接。</div>
+        <div><b>检测到本机存在 3x-ui 数据 (/etc/x-ui/x-ui.db 或 /root/3xui_backup.tar.gz)</b> · 可一键无损迁移全部入站节点、客户端凭据、路由转发、中转出站与 SSL 证书，不影响现有客户连接。</div>
         <button class="primary" data-action="jump-migrate">前往一键无损迁移 →</button>
       </div>
     ` : ''}
@@ -472,7 +474,7 @@ function renderInbounds() {
     return [item.remark, item.tag, item.protocol, item.port, item.outboundTag].join(' ').toLowerCase().includes(q);
   });
 
-  const subAllUrl = getBaseSubscriptionUrl('all');
+  const subAllUrl = getBaseSubscriptionUrl();
   const totalUp = state.inbounds.reduce((acc, i) => acc + Number(i.up || 0), 0);
   const totalDown = state.inbounds.reduce((acc, i) => acc + Number(i.down || 0), 0);
   const activeCount = state.inbounds.filter((i) => i.enable !== false).length;
@@ -909,15 +911,15 @@ function renderMigrate() {
     <article class="panel" style="border-color:var(--primary)">
       <div class="panel-head">
         <div>
-          <h2>3x-ui 数据解析预览结果</h2>
-          <p>解析成功！共识别到 ${preview.summary.inboundsCount} 个入站 (${preview.summary.clientsCount} 个客户端)、${preview.summary.outboundsCount} 个自定义中转出站、${preview.summary.rulesCount} 条分流规则</p>
+          <h2>3x-ui / X-Panel 备份解析预览结果</h2>
+          <p>解析成功！共识别到 ${preview.summary.inboundsCount} 个入站 (${preview.summary.clientsCount} 个客户端)、${preview.summary.outboundsCount} 个自定义中转出站、${preview.summary.rulesCount} 条分流规则${preview.summary.restoredCertsCount ? `、${preview.summary.restoredCertsCount} 张 SSL 域名证书 (${(preview.summary.restoredCertDomains || []).join(', ')})` : ''}${preview.summary.acmeRestored ? ' (含 .acme.sh 自动续签配置)' : ''}</p>
         </div>
         <span class="status valid">可 100% 无损迁移</span>
       </div>
       <div class="panel-body stack">
         <div class="codebox" style="max-height:220px">${esc(JSON.stringify({
           summary: preview.summary,
-          inboundsPreview: preview.inbounds.map((i) => ({ tag: i.tag, remark: i.remark, protocol: i.protocol, port: i.port, security: i.security, outboundTag: i.outboundTag, clientsCount: i.clients?.length || 0 })),
+          inboundsPreview: preview.inbounds.map((i) => ({ tag: i.tag, remark: i.remark, protocol: i.protocol, port: i.port, security: i.security, transport: i.transport, outboundTag: i.outboundTag, clientsCount: i.clients?.length || 0 })),
           outboundsPreview: preview.outbounds.map((o) => ({ tag: o.tag, type: o.type, server: o.server, port: o.port })),
           rulesCount: preview.rules.length
         }, null, 2))}</div>
@@ -931,7 +933,7 @@ function renderMigrate() {
       <td><span class="tag">${m.mode === 'replace' ? '覆盖替换' : '智能合并'}</span></td>
       <td>${m.inboundsCount || 0} 个入站 (${m.clientsCount || 0} 个客户端)</td>
       <td>${m.outboundsCount || 0} 个出站</td>
-      <td>${m.rulesCount || 0} 条分流规则</td>
+      <td>${m.rulesCount || 0} 条分流规则${m.restoredCertsCount ? ` · 证书: ${esc((m.restoredCertDomains || []).join(', '))}` : ''}</td>
     </tr>
   `).join('');
 
@@ -941,13 +943,13 @@ function renderMigrate() {
     <section class="grid-2">
       <article class="panel">
         <div class="panel-head">
-          <div><h2>方式一：上传 x-ui.db / 备份包 或读取本机</h2><p>支持直接上传 x-ui.db 数据库、.tar.gz 备份包，完整保留原端口、密钥、出站中转与路由规则</p></div>
+          <div><h2>方式一：上传 x-ui.db / 通用 .tar.gz 备份包 或读取本机</h2><p>支持直接上传 x-ui.db 数据库、或包含 /etc/x-ui/x-ui.db + /root/cert + /root/.acme.sh 的 .tar.gz 备份包，完整还原全部节点、中转出站、路由规则与 SSL 自动续签证书</p></div>
         </div>
         <div class="panel-body stack">
           <label class="upload-dropzone" for="xui-db-file">
             <input type="file" id="xui-db-file" accept=".db,.sqlite,.sqlite3,.gz,.tgz,.json" class="hidden">
             <b style="display:block;font-size:15px;margin-bottom:6px">📁 点击选择或拖拽上传 <code>x-ui.db</code> 或 <code>3xui_backup.tar.gz</code></b>
-            <span class="muted" style="font-size:12px" id="xui-file-label">支持 SQLite3 数据库 (x-ui.db)、.tar.gz 备份包或 JSON 文件</span>
+            <span class="muted" style="font-size:12px" id="xui-file-label">支持 SQLite3 数据库 (x-ui.db)、通用 .tar.gz 备份包或 JSON 文件</span>
           </label>
 
           <label>
@@ -995,13 +997,13 @@ function renderMigrate() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>历史迁移记录</h2><p>历次数据无损导入审计</p></div>
+        <div><h2>历史迁移记录</h2><p>历次数据与证书无损导入审计</p></div>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>迁移时间</th><th>模式</th><th>入站与客户端</th><th>迁移出站</th><th>迁移分流规则</th></tr></thead>
+          <thead><tr><th>迁移时间</th><th>模式</th><th>入站与客户端</th><th>迁移出站</th><th>迁移分流规则与证书</th></tr></thead>
           <tbody>
-            ${historyRows || '<tr><td colspan="5"><div class="empty"><b>尚无迁移记录</b><span>上传 x-ui.db 或粘贴 JSON 后将在此记录</span></div></td></tr>'}
+            ${historyRows || '<tr><td colspan="5"><div class="empty"><b>尚无迁移记录</b><span>上传 x-ui.db、备份包或粘贴 JSON 后将在此记录</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -1011,7 +1013,7 @@ function renderMigrate() {
 
 function renderCertificates() {
   const s = state.settings || {};
-  const baseSubUrl = getBaseSubscriptionUrl('all');
+  const baseSubUrl = getBaseSubscriptionUrl();
   const clashSubUrl = `${baseSubUrl}?format=clash`;
   const singboxSubUrl = `${baseSubUrl}?format=singbox`;
 
@@ -1076,7 +1078,7 @@ function renderCertificates() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>全节点聚合订阅中心</h2><p>支持 Shadowrocket、v2rayN、v2rayNG、NekoBox、Clash Verge / Mihomo、Sing-box、Stash、Surge、Hiddify 直接导入或按需展开二维码</p></div>
+        <div><h2>全节点聚合订阅中心 (高强度随机安全码防护)</h2><p>已启用 20 位随机安全码防扫描保护（拒绝简单 /sub/all 访问），支持 Shadowrocket、v2rayN、v2rayNG、NekoBox、Clash Verge / Mihomo、Sing-box、Stash、Surge、Hiddify 直接导入或按需展开二维码</p></div>
       </div>
       <div class="panel-body">
         <div class="qr-wall-grid">
@@ -1197,7 +1199,15 @@ function renderSettings() {
             <input name="webKeyFile" id="setting-key-file" value="${esc(s.webKeyFile || '')}" placeholder="留空则为 HTTP 模式">
           </label>
 
-          <div class="section-title">订阅、流量重置与日志级别</div>
+          <div class="section-title">订阅安全码、流量重置与日志级别</div>
+          <label class="wide">
+            聚合订阅安全码 (subToken · 20 位高强度随机字符，防止订阅链接被扫描或猜测泄露)
+            <div class="input-row">
+              <input name="subToken" id="setting-subtoken" value="${esc(s.subToken || '')}" placeholder="20 位随机安全码" required>
+              <button type="button" data-action="random-sub-token">🎲 重新生成 20 位安全码</button>
+            </div>
+            <small>更换安全码后，旧的聚合订阅链接将立即失效返回 404。</small>
+          </label>
           <label>
             订阅路径前缀 (subPath)
             <input name="subPath" value="${esc(s.subPath || '/sub/')}" placeholder="/sub/">
@@ -1266,7 +1276,7 @@ function renderSettings() {
             </div>
             <div class="command-item">
               <div>
-                <b>查看当前面板完整设置与访问地址 (简洁明了，方便直接复制)</b>
+                <b>查看当前面板配置与访问地址 (简洁明了，方便直接复制)</b>
                 <code>ng info</code>
               </div>
               <button data-copy="ng info">复制</button>
@@ -1792,9 +1802,9 @@ async function openInboundModal(existing = null, preset = '') {
  */
 function openInboundLinksModal(inbound) {
   const links = inbound.links || [];
-  const subToken = (links[0] && links[0].subId) || inbound.tag || 'all';
+  const subToken = (links[0] && links[0].subId) || inbound.tag || state.settings?.subToken || '';
   const clientSubUrl = getBaseSubscriptionUrl(subToken);
-  const allSubUrl = getBaseSubscriptionUrl('all');
+  const allSubUrl = getBaseSubscriptionUrl();
   const allClashUrl = `${allSubUrl}?format=clash`;
 
   const rows = links.map((l, idx) => `
@@ -1839,7 +1849,7 @@ function openInboundLinksModal(inbound) {
         <div id="qr-sub-box" class="subscription-qr hidden"></div>
       </div>
 
-      <div class="section-title">三、全节点聚合订阅地址 (包含面板所有已启用节点)</div>
+      <div class="section-title">三、全节点聚合订阅地址 (高强度随机安全码防护)</div>
       <div class="subscription-row">
         <div style="width:100%">
           <b>全节点聚合订阅地址 (通用 Base64 & Clash 智能分流)</b>
@@ -1872,10 +1882,10 @@ function openInboundLinksModal(inbound) {
 }
 
 /**
- * Compact All-Nodes Aggregate Subscription & QR Wall Modal (Fixed .qr-wall-card layout — zero blank space!)
+ * Compact All-Nodes Aggregate Subscription & QR Wall Modal
  */
 function openAggregateQrModal() {
-  const allSubUrl = getBaseSubscriptionUrl('all');
+  const allSubUrl = getBaseSubscriptionUrl();
   const clashSubUrl = `${allSubUrl}?format=clash`;
   const singboxSubUrl = `${allSubUrl}?format=singbox`;
 
@@ -2288,9 +2298,10 @@ document.addEventListener('click', async (e) => {
       render();
     }
     else if (action === 'open-aggregate-qr-modal') {
-      if (!state.inbounds.length) {
+      if (!state.inbounds.length || !state.settings?.subToken) {
         const data = await api('/api/inbounds');
         state.inbounds = data.inbounds || [];
+        if (data.settings) state.settings = data.settings;
       }
       openAggregateQrModal();
     }
@@ -2597,7 +2608,8 @@ document.addEventListener('click', async (e) => {
         render();
       } else {
         state.migrationPreview = null;
-        toast(`🎉 无损迁移完成: 已导入 ${res.summary.inboundsCount} 个入站、${res.summary.outboundsCount} 个出站、${res.summary.rulesCount} 条规则！`);
+        const certMsg = res.summary?.restoredCertsCount ? `、${res.summary.restoredCertsCount} 张 SSL 证书` : '';
+        toast(`🎉 无损迁移完成: 已导入 ${res.summary.inboundsCount} 个入站、${res.summary.outboundsCount} 个出站、${res.summary.rulesCount} 条规则${certMsg}！`);
         load('migrate');
       }
     }
@@ -2608,7 +2620,8 @@ document.addEventListener('click', async (e) => {
         method: 'POST',
         body: JSON.stringify({ source: 'local', dbPath })
       });
-      toast(`🎉 本机数据无损迁移完成: 入站 ${res.summary.inboundsCount} 个，出站 ${res.summary.outboundsCount} 个`);
+      const certMsg = res.summary?.restoredCertsCount ? `、${res.summary.restoredCertsCount} 张 SSL 证书` : '';
+      toast(`🎉 本机数据无损迁移完成: 入站 ${res.summary.inboundsCount} 个，出站 ${res.summary.outboundsCount} 个${certMsg}`);
       load('migrate');
     }
     else if (action === 'preview-xui-json' || action === 'apply-xui-json') {
@@ -2740,6 +2753,11 @@ document.addEventListener('click', async (e) => {
     else if (action === 'reset-path') {
       const el = $('#setting-webpath');
       if (el) el.value = '/';
+    }
+    else if (action === 'random-sub-token') {
+      const el = $('#setting-subtoken');
+      if (el) el.value = genRandomAlnum(20);
+      toast('已生成新的 20 位聚合订阅安全码，点击下方【保存面板设置】生效');
     }
     else if (action === 'random-account-user') {
       const el = $('#account-user-input');
