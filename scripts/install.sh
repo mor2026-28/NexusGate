@@ -163,7 +163,7 @@ configure_panel() {
 
   if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
     echo ""
-    echo -e "${cyan}=== NexusGate Sing-box 面板初始化安全配置 (直接回车使用高强度随机值) ===${plain}"
+    echo -e "${cyan}=== NexusGate · 枢门 面板初始化安全配置 (直接回车使用高强度随机值) ===${plain}"
     read -r -p "请输入面板端口 [默认随机: ${default_port}]: " input_port </dev/tty || true
     [[ -n "${input_port:-}" ]] && panel_port="${input_port//[^0-9]/}"
 
@@ -254,7 +254,7 @@ PY
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.7 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate · 枢门 v2.8 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
   echo -e " 访问地址   : ${cyan}${login_url}${plain}"
   echo -e " 登录账号   : ${green}${admin_user}${plain}"

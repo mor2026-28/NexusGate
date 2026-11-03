@@ -258,7 +258,7 @@ function setPage(page) {
     settings: '面板设置与安全'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NEXUSGATE / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate · 枢门 / ${titles[page] || ''}`;
   load(page);
 }
 
@@ -1458,12 +1458,12 @@ async function openInboundModal(existing = null, preset = '') {
       <label>
         限制同时在线公网 IP 数 (0 = 不限制)
         <input name="limitIp" type="number" min="0" max="1000" value="${esc(item.limitIp || 0)}" placeholder="0 表示不限制公网 IP 数">
-        <small>超出设定公网 IP 数量的新连接将被实时自动断开</small>
+        <small>超出设定数量时，仅拦截并断开第 N+1 个新接入的 IP，前 N 个已在线 IP/设备不受影响正常使用</small>
       </label>
       <label>
         限制同时在线设备数 (0 = 不限制)
         <input name="limitDevice" type="number" min="0" max="2000" value="${esc(item.limitDevice || 0)}" placeholder="0 表示不限制设备台数">
-        <small>超出设定在线设备台数的新连接将被实时拦截并断开</small>
+        <small>超出设定数量时，仅拦截并断开第 N+1 台新接入的设备，前 N 台已在线设备不受影响正常使用</small>
       </label>
 
       <label>

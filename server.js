@@ -50,7 +50,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '2.7.0';
+const VERSION = '2.8.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -945,6 +945,7 @@ async function handleRequest(req, res) {
             inb.up = 0;
             inb.down = 0;
             for (const c of inb.clients || []) { c.up = 0; c.down = 0; }
+            singbox.clearInboundLeases(inb.tag);
             if (inb.enable === false && inb.disabledReason === 'quota') {
               inb.enable = true;
               delete inb.disabledReason;
@@ -1028,6 +1029,7 @@ async function handleRequest(req, res) {
     if (inbReset && method === 'POST') {
       const existing = store.state.inbounds.find((x) => x.id === inbReset.id);
       if (!existing) return sendError(res, 404, '未找到该入站节点');
+      singbox.clearInboundLeases(existing.tag);
       store.transact(() => {
         existing.up = 0;
         existing.down = 0;
@@ -1769,7 +1771,7 @@ function startPanelServer(callback) {
   activeServer = server;
 
   server.listen(port, host, () => {
-    console.log(`[NexusGate Sing-box v${VERSION}] 面板已启动: ${proto}://${host}:${port}${basePath === '/' ? '/' : `${basePath}/`}`);
+    console.log(`[NexusGate · 枢门 v${VERSION}] 面板已启动: ${proto}://${host}:${port}${basePath === '/' ? '/' : `${basePath}/`}`);
     try {
       singbox.writeConfig();
       if (fs.existsSync(singbox.getBinPath())) {
@@ -1803,9 +1805,10 @@ if (require.main === module) {
     }
     store.flushIfDirty();
   }, 60000).unref();
-  setInterval(() => singbox.pollConnectionsAndEnforceLimits().catch(() => {}), 2000).unref();
+  setInterval(() => singbox.pollConnectionsAndEnforceLimits().catch(() => {}), 1000).unref();
 
   const gracefulShutdown = () => {
+    try { singbox.clearAllTempIpBlocks(); } catch { /* ignore */ }
     try { store.flushIfDirty(); } catch { /* ignore */ }
     process.exit(0);
   };

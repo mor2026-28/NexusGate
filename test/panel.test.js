@@ -203,20 +203,75 @@ test('3. Sing-box Clash API metadata.type ("anytls/inbound-XXXX") traffic attrib
   store.state.settings.clashApiPort = clashPort;
 
   try {
-    await singbox.pollConnectionsAndEnforceLimits(new Date());
+    const baseTime = Date.now();
+    await singbox.pollConnectionsAndEnforceLimits(new Date(baseTime));
     // Wait briefly for async DELETE request to hit mockClashServer
     await new Promise((r) => setTimeout(r, 80));
 
     assert.equal(singbox.getActiveDeviceCountForInbound(anytlsInbound.tag), 2, 'Should show 2 online devices (not 3, and not splitting 1 device across ports)');
     assert.deepEqual(singbox.getActiveIpsForInbound(anytlsInbound.tag), ['203.0.113.10', '203.0.113.20']);
-    assert.ok(closedConnIds.includes('conn-dev3-excess'), '3rd device connection must be closed via Clash API DELETE');
-    assert.ok(!closedConnIds.includes('conn-dev1-a') && !closedConnIds.includes('conn-dev1-b'), '1st device multiple sockets must NOT be false-killed');
-    assert.ok(anytlsInbound.up >= 7120 && anytlsInbound.down >= 14240, 'Inbound traffic must be accumulated from metadata.type');
+    assert.ok(closedConnIds.includes('conn-dev3-excess'), '3rd excess device connection must be closed via Clash API DELETE');
+    assert.ok(!closedConnIds.includes('conn-dev1-a') && !closedConnIds.includes('conn-dev1-b') && !closedConnIds.includes('conn-dev2-a'), '1st and 2nd allowed devices must NEVER be interrupted when 3rd device connects');
+    assert.equal(anytlsInbound.up, 7120, 'Only allowed devices (1st + 2nd) traffic should be accumulated');
+    assert.equal(anytlsInbound.down, 14240, 'Only allowed devices (1st + 2nd) download traffic should be accumulated');
+
+    // Poll #2: 1st and 2nd devices keep using traffic while 3rd device retries -> 1st & 2nd keep working smoothly, 3rd retry is blocked
+    mockConnections = [
+      {
+        id: 'conn-dev1-a',
+        metadata: { network: 'tcp', type: `anytls/${anytlsInbound.tag}`, sourceIP: '203.0.113.10', sourcePort: '51001', destinationPort: '443', host: 'openai.com' },
+        upload: 6096,
+        download: 12192,
+        chains: ['direct']
+      },
+      {
+        id: 'conn-dev2-a',
+        metadata: { network: 'tcp', type: `anytls/${anytlsInbound.tag}`, sourceIP: '203.0.113.20', sourcePort: '53000', destinationPort: '443', host: 'github.com' },
+        upload: 3000,
+        download: 6000,
+        chains: ['direct']
+      },
+      {
+        id: 'conn-dev3-retry',
+        metadata: { network: 'tcp', type: `anytls/${anytlsInbound.tag}`, sourceIP: '203.0.113.30', sourcePort: '54099', destinationPort: '443', host: 'youtube.com' },
+        upload: 999,
+        download: 999,
+        chains: ['direct']
+      }
+    ];
+    await singbox.pollConnectionsAndEnforceLimits(new Date(baseTime + 2000));
+    await new Promise((r) => setTimeout(r, 80));
+    assert.ok(closedConnIds.includes('conn-dev3-retry'), '3rd device retry must also be blocked');
+    assert.ok(!closedConnIds.includes('conn-dev1-a') && !closedConnIds.includes('conn-dev2-a'), '1st and 2nd devices remain completely uninterrupted');
+    assert.equal(anytlsInbound.up, 10120, '1st and 2nd devices continue accumulating traffic normally');
 
     // Even when active connections momentarily drop to [], 60s rolling lease keeps online count visible in UI
     mockConnections = [];
-    await singbox.pollConnectionsAndEnforceLimits(new Date(Date.now() + 5000));
+    await singbox.pollConnectionsAndEnforceLimits(new Date(baseTime + 5000));
     assert.equal(singbox.getActiveDeviceCountForInbound(anytlsInbound.tag), 2, 'Online devices should remain visible within 60s lease window');
+
+    // After 65s idle of 2nd device (while 1st device stays active), 2nd slot is freed and 3rd device is now admitted cleanly
+    mockConnections = [
+      {
+        id: 'conn-dev1-a',
+        metadata: { network: 'tcp', type: `anytls/${anytlsInbound.tag}`, sourceIP: '203.0.113.10', sourcePort: '51001', destinationPort: '443', host: 'openai.com' },
+        upload: 7096,
+        download: 14192,
+        chains: ['direct']
+      }
+    ];
+    await singbox.pollConnectionsAndEnforceLimits(new Date(baseTime + 40000));
+    mockConnections.push({
+      id: 'conn-dev3-admitted',
+      metadata: { network: 'tcp', type: `anytls/${anytlsInbound.tag}`, sourceIP: '203.0.113.30', sourcePort: '55000', destinationPort: '443', host: 'youtube.com' },
+      upload: 1000,
+      download: 2000,
+      chains: ['direct']
+    });
+    await singbox.pollConnectionsAndEnforceLimits(new Date(baseTime + 70000));
+    await new Promise((r) => setTimeout(r, 80));
+    assert.ok(!closedConnIds.includes('conn-dev3-admitted'), 'Once a slot frees up after 60s idle, 3rd device is admitted without being closed');
+    assert.deepEqual(singbox.getActiveIpsForInbound(anytlsInbound.tag), ['203.0.113.10', '203.0.113.30']);
   } finally {
     await new Promise((resolve) => mockClashServer.close(resolve));
   }
