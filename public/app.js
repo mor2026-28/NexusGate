@@ -21,7 +21,8 @@ const state = {
   settings: {},
   admin: {},
   migrations: [],
-  migrationPreview: null
+  migrationPreview: null,
+  expandedInbounds: new Set()
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -236,6 +237,12 @@ async function load(page = state.page, options = {}) {
       const data = await api('/api/inbounds');
       if (page !== state.page || seq !== currentLoadSeq) return;
       state.inbounds = data.inbounds || [];
+      if (!state._autoExpandedMultiOnce) {
+        state._autoExpandedMultiOnce = true;
+        for (const inb of state.inbounds) {
+          if ((inb.clients?.length || 0) > 1) state.expandedInbounds.add(inb.id);
+        }
+      }
       state.outbounds = data.outbounds || [];
       state.certificates = data.certificates || [];
       if (data.settings) state.settings = data.settings;
@@ -583,12 +590,116 @@ function renderInbounds() {
     const devStyle = activeDevCount > 0 ? 'color:var(--success);font-weight:800' : '';
     const limitText = `${expiryHtml}IP: <b style="${ipStyle}">${activeIpCount}</b>/${limitIp > 0 ? limitIp : '∞'} · 设备: <b style="${devStyle}">${activeDevCount}</b>/${limitDevice > 0 ? limitDevice : '∞'}</small>`;
 
+    const clients = Array.isArray(item.clients) ? item.clients : [];
+    const clientCount = clients.length;
+    const isMultiClient = clientCount > 1;
+    const isExpanded = state.expandedInbounds.has(item.id);
+    const clientNamesSummary = isMultiClient
+      ? `<small style="color:var(--primary);font-weight:650;cursor:pointer" data-action="toggle-expand-clients" data-id="${esc(item.id)}">👥 ${clientCount} 个用户: ${esc(clients.map((c) => c.email).join(' / '))} (${isExpanded ? '点击收起 ▴' : '点击展开管理 ▾'})</small>`
+      : '';
+
+    const clientSubRows = (item.protocol !== 'direct' && isExpanded) ? `
+      <tr class="client-subrow">
+        <td colspan="8">
+          <div class="client-subbox">
+            <div class="client-subhead">
+              <div>
+                <b>👥 节点 [${esc(item.remark)}] 下的用户 / 客户端列表 (共 ${clientCount} 个)</b>
+                <span class="muted" style="margin-left:8px">支持独立二维码/订阅链接、独立流量统计与重置、独立 IP/设备数限制与到期控制</span>
+              </div>
+              <button class="primary" data-action="add-client" data-id="${esc(item.id)}">＋ 添加用户 / 客户端</button>
+            </div>
+            <div style="overflow-x:auto">
+              <table class="client-subtable">
+                <thead>
+                  <tr>
+                    <th>状态</th>
+                    <th>在线情况</th>
+                    <th>客户 / 用户 (备注与凭据)</th>
+                    <th>已用流量 / 累计总流量</th>
+                    <th>独立限制</th>
+                    <th>到期时间</th>
+                    <th style="text-align:right">独立操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${clients.map((c) => {
+                    const cUp = Number(c.up || 0);
+                    const cDown = Number(c.down || 0);
+                    const cTotal = Number(c.totalBytes || (c.totalGB > 0 ? (c.totalGB > 1024 * 1024 ? c.totalGB : c.totalGB * (1024 ** 3)) : 0));
+                    const cQuotaStr = cTotal > 0 ? fmtBytes(cTotal) : '∞';
+                    const cOnlineDevs = Number(c.activeDeviceCount || 0);
+                    const cOnlineIps = Number(c.activeIpCount || 0);
+                    const cLimIp = Number(c.limitIp || 0);
+                    const cLimDev = Number(c.limitDevice || 0);
+                    const cred = ['vless', 'vmess', 'tuic'].includes(item.protocol)
+                      ? (c.id || c.uuid || '')
+                      : (c.password || '');
+                    let cExpStr = '∞ (永久有效)';
+                    if (c.expiryTime && c.expiryTime > 0) {
+                      const diff = c.expiryTime - Date.now();
+                      cExpStr = diff <= 0 ? `已到期 (${fmtDate(c.expiryTime)})` : `${fmtDate(c.expiryTime)} (剩${Math.ceil(diff / 86400000)}天)`;
+                    }
+                    return `
+                      <tr>
+                        <td>
+                          <span class="status ${c.enable !== false ? 'active' : 'disabled'}">
+                            ${c.enable !== false ? '已启用' : (c.disabledReason === 'expired' ? '已到期' : (c.disabledReason === 'quota' ? '流量耗尽' : '已停用'))}
+                          </span>
+                        </td>
+                        <td>
+                          <span class="tag ${cOnlineDevs > 0 ? 'tls' : ''}" title="${esc((c.activeIps || []).join(', '))}">
+                            ${cOnlineDevs > 0 ? `🟢 在线 ${cOnlineDevs} 设备` : '⚪ 离线'}
+                          </span>
+                        </td>
+                        <td>
+                          <strong>${esc(c.email || c.name || 'user')}</strong>
+                          <small><code>${esc(cred.slice(0, 24))}${cred.length > 24 ? '…' : ''}</code></small>
+                        </td>
+                        <td>
+                          <div><span class="status valid">↑ ${fmtBytes(cUp)} / ↓ ${fmtBytes(cDown)}</span></div>
+                          <small>累计: <b>${fmtBytes(cUp + cDown)}</b> / ${esc(cQuotaStr)}</small>
+                        </td>
+                        <td>
+                          <small>IP: <b>${cOnlineIps}</b>/${cLimIp > 0 ? cLimIp : '∞'} · 设备: <b>${cOnlineDevs}</b>/${cLimDev > 0 ? cLimDev : '∞'}</small>
+                        </td>
+                        <td><small>${esc(cExpStr)}</small></td>
+                        <td>
+                          <div class="actions">
+                            <button class="primary" data-action="client-links" data-id="${esc(item.id)}" data-client-id="${esc(c.id)}">二维码/订阅</button>
+                            <button data-action="edit-client" data-id="${esc(item.id)}" data-client-id="${esc(c.id)}">编辑</button>
+                            <button data-action="reset-client-traffic" data-id="${esc(item.id)}" data-client-id="${esc(c.id)}">清零</button>
+                            <button data-action="toggle-client" data-id="${esc(item.id)}" data-client-id="${esc(c.id)}">${c.enable !== false ? '停用' : '启用'}</button>
+                            ${clientCount > 1 ? `<button class="danger" data-action="delete-client" data-id="${esc(item.id)}" data-client-id="${esc(c.id)}">删除</button>` : ''}
+                          </div>
+                        </td>
+                      </tr>
+                    `;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </td>
+      </tr>
+    ` : '';
+
     return `
       <tr>
-        <td><strong>${idx + 1}</strong></td>
         <td>
-          <strong>${esc(item.remark)}</strong>
+          ${item.protocol !== 'direct'
+            ? `<button class="row-expand-btn ${isExpanded ? 'active' : ''}" data-action="toggle-expand-clients" data-id="${esc(item.id)}" title="点击展开/收起该节点下的用户列表">${isExpanded ? '−' : '+'} ${idx + 1}</button>`
+            : `<strong>${idx + 1}</strong>`}
+        </td>
+        <td>
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <strong>${esc(item.remark)}</strong>
+            ${item.protocol !== 'direct'
+              ? `<span class="client-count-pill ${isMultiClient ? 'multi' : ''}" data-action="toggle-expand-clients" data-id="${esc(item.id)}" title="点击展开/管理该节点下的用户">👥 ${clientCount} 用户 ${isExpanded ? '▴' : '▾'}</span>`
+              : ''}
+          </div>
           <small>Tag: <code>${esc(item.tag)}</code> · 监听: ${esc(item.listen || '::')}</small>
+          ${clientNamesSummary}
           ${directNote}
         </td>
         <td>
@@ -609,6 +720,7 @@ function renderInbounds() {
         <td>
           <div class="actions">
             ${item.protocol !== 'direct' ? `<button class="primary" data-action="inbound-links" data-id="${esc(item.id)}">链接 / 订阅</button>` : ''}
+            ${item.protocol !== 'direct' ? `<button data-action="add-client" data-id="${esc(item.id)}" title="向该入站节点添加新用户">＋用户</button>` : ''}
             <button data-action="edit-inbound" data-id="${esc(item.id)}">编辑</button>
             <button data-action="reset-inbound-traffic" data-id="${esc(item.id)}" title="重置该节点流量">清零</button>
             <button data-action="toggle-inbound" data-id="${esc(item.id)}">${item.enable !== false ? '停用' : '启用'}</button>
@@ -616,6 +728,7 @@ function renderInbounds() {
           </div>
         </td>
       </tr>
+      ${clientSubRows}
     `;
   }).join('');
 
@@ -1895,31 +2008,123 @@ async function openInboundModal(existing = null, preset = '') {
 /**
  * Inbound Share Links & Subscription Modal — QR Codes Default to Collapsed (hidden)
  */
-function openInboundLinksModal(inbound) {
-  const links = inbound.links || [];
+function openClientModal(inbound, existingClient = null) {
+  const isEdit = Boolean(existingClient);
+  const isUuidProto = ['vless', 'vmess', 'tuic'].includes(inbound.protocol);
+  const isSocksProto = ['socks', 'mixed', 'http'].includes(inbound.protocol);
+  const c = existingClient ? JSON.parse(JSON.stringify(existingClient)) : {
+    id: isUuidProto ? genUuidClient() : '',
+    email: `${inbound.remark}_user_${(inbound.clients?.length || 0) + 1}`,
+    username: `user_${genRandomAlnum(6)}`,
+    password: genRandomAlnum(20),
+    flow: inbound.protocol === 'vless' ? (inbound.flow || '') : '',
+    limitIp: 0,
+    limitDevice: 0,
+    totalGB: 0,
+    expiryTime: 0,
+    enable: true
+  };
+  const totalGbVal = c.totalGB || (c.totalBytes ? Math.round((c.totalBytes / (1024 ** 3)) * 100) / 100 : 0);
+  const expiryVal = c.expiryTime && c.expiryTime > 0
+    ? new Date(c.expiryTime - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+    : '';
+
+  openModal(
+    isEdit ? `编辑节点用户 · ${inbound.remark} (:${inbound.port})` : `添加节点新用户 · ${inbound.remark} (:${inbound.port})`,
+    isEdit ? `用户: ${c.email}` : `向 [${inbound.remark}] 添加独立客户端用户`,
+    `
+    <form id="client-form" data-inbound-id="${esc(inbound.id)}" data-client-id="${esc(isEdit ? c.id : '')}" class="form-grid">
+      <label>
+        客户 / 用户备注名称 (Email / 标识)
+        <input name="email" value="${esc(c.email || '')}" required placeholder="例如: 1558yowe 或 VIP客户A">
+      </label>
+      <label style="flex-direction:row;align-items:center;gap:8px;padding-top:22px">
+        <input type="checkbox" name="enable" style="width:18px;min-height:18px" ${c.enable !== false ? 'checked' : ''}>
+        <span><b>启用该用户</b>（停用后仅断开该用户，不影响同节点下其他用户）</span>
+      </label>
+
+      ${isUuidProto ? `
+        <label class="wide">
+          用户专属 UUID
+          <div class="input-row">
+            <input name="uuid" id="client-modal-uuid" value="${esc(c.id || c.uuid || genUuidClient())}" required>
+            <button type="button" data-action="gen-client-modal-uuid">🎲 随机生成 UUID</button>
+          </div>
+        </label>
+      ` : ''}
+
+      ${!isUuidProto || inbound.protocol === 'tuic' ? `
+        <label class="wide">
+          ${isSocksProto ? '认证密码 (Password)' : '用户专属连接密码 (Password)'}
+          <div class="input-row">
+            <input name="password" id="client-modal-pass" value="${esc(c.password || genRandomAlnum(20))}" required>
+            <button type="button" data-action="gen-clean-pass" data-target="client-modal-pass">🎲 随机密码</button>
+          </div>
+        </label>
+      ` : ''}
+
+      <div class="section-title">该用户独立 IP / 设备限制、流量配额与到期时间</div>
+      <label>
+        该用户限制同时在线 IP 数 (0 = 不限制)
+        <input name="limitIp" type="number" min="0" max="1000" value="${esc(c.limitIp || 0)}">
+        <small>独立计算该用户的在线 IP 数，不影响同节点其他用户</small>
+      </label>
+      <label>
+        该用户限制同时在线设备数 (0 = 不限制)
+        <input name="limitDevice" type="number" min="0" max="2000" value="${esc(c.limitDevice || 0)}">
+        <small>超出时仅拦截该用户多出的设备，已在线设备正常使用</small>
+      </label>
+      <label>
+        该用户独立流量配额 (GB，0 = 不限制)
+        <input name="totalGB" type="number" min="0" step="0.1" value="${esc(totalGbVal)}">
+      </label>
+      <label>
+        该用户独立到期时间 (留空 = 永久有效)
+        <input name="expiryTime" type="datetime-local" value="${esc(expiryVal)}">
+      </label>
+
+      <div class="form-actions">
+        <button type="button" data-close>取消</button>
+        <button type="submit" class="primary">${isEdit ? '保存用户设置' : '立即添加用户'}</button>
+      </div>
+    </form>
+    `
+  );
+}
+
+function openInboundLinksModal(inbound, filterClientId = null) {
+  const allLinks = inbound.links || [];
+  const links = filterClientId
+    ? allLinks.filter((l) => l.clientId === filterClientId || l.clientName === filterClientId)
+    : allLinks;
   const subToken = (links[0] && links[0].subId) || inbound.tag || state.settings?.subToken || '';
   const clientSubUrl = getBaseSubscriptionUrl(subToken);
   const allSubUrl = getBaseSubscriptionUrl();
   const allClashUrl = `${allSubUrl}?format=clash`;
 
-  const rows = links.map((l, idx) => `
+  const rows = links.map((l, idx) => {
+    const perUserSubUrl = getBaseSubscriptionUrl(l.subId || inbound.tag);
+    return `
     <div class="subscription-row">
-      <div>
-        <b>${esc(l.name)} (${esc(l.protocol.toUpperCase())} · 端口 :${inbound.port})</b>
+      <div style="width:100%">
+        <b>${esc(l.name)} (用户: ${esc(l.clientName || '默认')} · ${esc(l.protocol.toUpperCase())} :${inbound.port})</b>
         <small style="color:var(--success)">✓ 支持 v2rayN / v2rayNG / Shadowrocket / NekoBox / Mihomo / Sing-box / Hiddify 直接导入或展开扫码</small>
         <code style="white-space:normal;word-break:break-all;display:block;margin-top:4px;padding:8px;background:var(--surface);border:1px solid var(--line);border-radius:8px">${esc(l.uri)}</code>
         ${l.altUri ? `<small style="margin-top:4px">备用兼容链接: <code>${esc(l.altUri)}</code></small>` : ''}
+        <small style="margin-top:4px;display:block">该用户独立订阅链接: <code>${esc(perUserSubUrl)}</code></small>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;width:100%;justify-content:flex-end">
         <button class="primary" data-copy="${esc(l.uri)}">📋 复制节点链接</button>
-        ${l.altUri ? `<button data-copy="${esc(l.altUri)}">复制备用链接</button>` : ''}
+        <button data-copy="${esc(perUserSubUrl)}">🔗 复制该用户订阅</button>
+        <button data-copy="${esc(`${perUserSubUrl}?format=clash`)}">⚡ 复制该用户 Clash 订阅</button>
         ${l.clashYaml ? `<button data-copy="${esc(l.clashYaml)}">复制 Clash YAML</button>` : ''}
         ${l.singboxJson ? `<button data-copy="${esc(l.singboxJson)}">复制 Sing-box JSON</button>` : ''}
         <button data-qr-inline="qr-box-${idx}" data-qr-text="${esc(l.uri)}">📱 展开/收起二维码</button>
       </div>
       <div id="qr-box-${idx}" class="subscription-qr hidden"></div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   openModal(
     `节点分享链接、二维码与客户端订阅 · 端口 :${inbound.port}`,
@@ -2501,6 +2706,51 @@ document.addEventListener('click', async (e) => {
       const inb = state.inbounds.find((x) => x.id === actEl.dataset.id);
       if (inb) openInboundLinksModal(inb);
     }
+    else if (action === 'toggle-expand-clients') {
+      const id = actEl.dataset.id;
+      if (state.expandedInbounds.has(id)) state.expandedInbounds.delete(id);
+      else state.expandedInbounds.add(id);
+      render();
+    }
+    else if (action === 'add-client') {
+      const inb = state.inbounds.find((x) => x.id === actEl.dataset.id);
+      if (inb) openClientModal(inb, null);
+    }
+    else if (action === 'edit-client') {
+      const inb = state.inbounds.find((x) => x.id === actEl.dataset.id);
+      const cl = (inb?.clients || []).find((c) => c.id === actEl.dataset.clientId);
+      if (inb && cl) openClientModal(inb, cl);
+    }
+    else if (action === 'client-links') {
+      const inb = state.inbounds.find((x) => x.id === actEl.dataset.id);
+      if (inb) openInboundLinksModal(inb, actEl.dataset.clientId);
+    }
+    else if (action === 'reset-client-traffic') {
+      const inbId = actEl.dataset.id;
+      const clientId = actEl.dataset.clientId;
+      await api(`/api/inbounds/${inbId}/clients/${encodeURIComponent(clientId)}/reset-traffic`, { method: 'POST' });
+      toast('该用户已用流量已清零');
+      load('inbounds');
+    }
+    else if (action === 'toggle-client') {
+      const inbId = actEl.dataset.id;
+      const clientId = actEl.dataset.clientId;
+      await api(`/api/inbounds/${inbId}/clients/${encodeURIComponent(clientId)}/toggle`, { method: 'POST' });
+      toast('该用户启用状态已切换');
+      load('inbounds');
+    }
+    else if (action === 'delete-client') {
+      if (!confirm('确认从该入站节点下删除此用户吗？')) return;
+      const inbId = actEl.dataset.id;
+      const clientId = actEl.dataset.clientId;
+      await api(`/api/inbounds/${inbId}/clients/${encodeURIComponent(clientId)}`, { method: 'DELETE' });
+      toast('已删除该用户');
+      load('inbounds');
+    }
+    else if (action === 'gen-client-modal-uuid') {
+      const input = $('#client-modal-uuid');
+      if (input) input.value = genUuidClient();
+    }
     else if (action === 'reset-inbound-traffic') {
       await api(`/api/inbounds/${actEl.dataset.id}/reset-traffic`, { method: 'POST' });
       toast('入站节点流量已重置');
@@ -2993,6 +3243,37 @@ document.addEventListener('submit', async (e) => {
       } else {
         await api('/api/inbounds', { method: 'POST', body: JSON.stringify(payload) });
         toast('入站节点已创建并生效');
+      }
+      closeModal();
+      load('inbounds');
+    }
+    else if (form.id === 'client-form') {
+      const inboundId = form.dataset.inboundId;
+      const clientId = form.dataset.clientId;
+      const expiryMs = data.expiryTime ? new Date(data.expiryTime).getTime() : 0;
+      const payload = {
+        email: data.email,
+        uuid: data.uuid,
+        password: data.password,
+        limitIp: Number(data.limitIp || 0),
+        limitDevice: Number(data.limitDevice || 0),
+        totalGB: Number(data.totalGB || 0),
+        expiryTime: Number.isFinite(expiryMs) && expiryMs > 0 ? expiryMs : 0,
+        enable: form.querySelector('[name="enable"]')?.checked !== false
+      };
+      if (clientId) {
+        await api(`/api/inbounds/${inboundId}/clients/${encodeURIComponent(clientId)}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload)
+        });
+        toast('用户配置已更新并生效');
+      } else {
+        await api(`/api/inbounds/${inboundId}/clients`, {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        state.expandedInbounds.add(inboundId);
+        toast('新用户已添加至该节点并生效');
       }
       closeModal();
       load('inbounds');

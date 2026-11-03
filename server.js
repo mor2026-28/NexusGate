@@ -50,7 +50,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '2.9.0';
+const VERSION = '3.0.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -613,39 +613,49 @@ function normalizeInboundPayload(body, existing = null) {
 
   if (Array.isArray(body.clients) && body.clients.length > 0) {
     inbound.clients = body.clients.map((c, i) => {
-      const rawClientPass = String(c.password || inbound.password || inbound.socksPassword || randomString(18)).trim();
+      const prevClient = existing?.clients?.find((ec) => (c.id && ec.id === c.id) || (c.email && ec.email === c.email)) || existing?.clients?.[i] || {};
+      const rawClientPass = String(c.password ?? prevClient.password ?? inbound.password ?? inbound.socksPassword ?? randomString(18)).trim();
       const clientPass = protocol === 'shadowsocks'
         ? (body.clients.length === 1 ? inbound.password : ensureSsPassword(inbound.method, rawClientPass))
         : rawClientPass;
+      const cTotalGB = Math.max(0, Number(c.totalGB ?? prevClient.totalGB ?? (body.clients.length === 1 ? totalGB : 0)));
+      const cTotalBytes = c.totalBytes !== undefined ? Number(c.totalBytes) : (cTotalGB > 0 ? Math.round(cTotalGB * (1024 ** 3)) : Number(prevClient.totalBytes || 0));
+      const cExpiry = c.expiryTime !== undefined ? parseExpiryTimeInput(c.expiryTime, 0) : Number(prevClient.expiryTime ?? (body.clients.length === 1 ? expiryTime : 0));
       return {
-        id: ensureUuid(c.id || c.uuid),
-        email: String(c.email || c.name || `${remark}_${i + 1}`).trim(),
-        username: String(c.username || c.email || `user_${i + 1}`).trim(),
+        id: ['vless', 'vmess', 'tuic'].includes(protocol)
+          ? ensureUuid(c.id || c.uuid || prevClient.id)
+          : String(c.id || prevClient.id || crypto.randomUUID()),
+        email: String(c.email || c.name || prevClient.email || `${remark}_${i + 1}`).trim(),
+        username: String(c.username || c.email || prevClient.username || `user_${i + 1}`).trim(),
         password: clientPass,
-        flow: c.flow !== undefined ? c.flow : (inbound.flow || ''),
-        subId: String(c.subId || randomString(16)).trim(),
-        limitIp: Number(c.limitIp ?? inbound.limitIp ?? 0),
-        limitDevice: Number(c.limitDevice ?? inbound.limitDevice ?? 0),
-        totalGB: Number(c.totalGB || totalGB || 0),
-        up: Number(c.up || 0),
-        down: Number(c.down || 0),
-        expiryTime: Number(c.expiryTime || expiryTime || 0),
-        enable: c.enable !== false
+        flow: c.flow !== undefined ? c.flow : (prevClient.flow ?? inbound.flow ?? ''),
+        subId: String(c.subId || prevClient.subId || randomString(16)).trim(),
+        limitIp: Math.max(0, Number(c.limitIp ?? prevClient.limitIp ?? (body.clients.length === 1 ? inbound.limitIp : 0))),
+        limitDevice: Math.max(0, Number(c.limitDevice ?? prevClient.limitDevice ?? (body.clients.length === 1 ? inbound.limitDevice : 0))),
+        totalGB: cTotalGB,
+        totalBytes: cTotalBytes,
+        up: Number(c.up ?? prevClient.up ?? 0),
+        down: Number(c.down ?? prevClient.down ?? 0),
+        expiryTime: cExpiry,
+        enable: c.enable !== undefined ? Boolean(c.enable) : (prevClient.enable !== false)
       };
     });
   } else if (existing?.clients?.length && !body.resetClients) {
+    const isMulti = existing.clients.length > 1;
     inbound.clients = existing.clients.map((c, idx) => ({
       ...c,
-      id: ensureUuid(idx === 0 && body.uuid ? body.uuid : c.id),
+      id: idx === 0 && body.uuid
+        ? ensureUuid(body.uuid)
+        : (['vless', 'vmess', 'tuic'].includes(inbound.protocol) ? ensureUuid(c.id) : String(c.id || crypto.randomUUID())),
       email: idx === 0 && body.clientEmail ? body.clientEmail : c.email,
-      username: ['socks', 'mixed', 'http'].includes(inbound.protocol) && inbound.socksUser ? inbound.socksUser : c.username,
-      limitIp: inbound.limitIp,
-      limitDevice: inbound.limitDevice,
-      expiryTime: inbound.expiryTime,
-      flow: inbound.protocol === 'vless' ? (inbound.flow ?? c.flow ?? '') : c.flow,
-      password: ['anytls', 'hysteria2', 'trojan', 'shadowsocks', 'tuic'].includes(inbound.protocol) && inbound.password
+      username: idx === 0 && ['socks', 'mixed', 'http'].includes(inbound.protocol) && inbound.socksUser ? inbound.socksUser : c.username,
+      limitIp: isMulti ? Number(c.limitIp ?? 0) : inbound.limitIp,
+      limitDevice: isMulti ? Number(c.limitDevice ?? 0) : inbound.limitDevice,
+      expiryTime: isMulti ? Number(c.expiryTime ?? 0) : inbound.expiryTime,
+      flow: inbound.protocol === 'vless' ? (idx === 0 && body.flow !== undefined ? body.flow : (c.flow ?? inbound.flow ?? '')) : c.flow,
+      password: idx === 0 && ['anytls', 'hysteria2', 'trojan', 'shadowsocks', 'tuic'].includes(inbound.protocol) && inbound.password
         ? inbound.password
-        : (['socks', 'mixed', 'http'].includes(inbound.protocol) && inbound.socksPassword ? inbound.socksPassword : c.password)
+        : (idx === 0 && ['socks', 'mixed', 'http'].includes(inbound.protocol) && inbound.socksPassword ? inbound.socksPassword : c.password)
     }));
   } else if (protocol !== 'direct') {
     inbound.clients = [
@@ -733,8 +743,21 @@ function enrichInboundWithLinks(inbound, reqHost = '') {
   const defaultHost = store.state.settings.webDomain || realCert?.domain || store.state.settings.publicIPv4 || cleanReqHost || '127.0.0.1';
   const activeIps = singbox.getActiveIpsForInbound(inbound.tag);
   const activeDeviceCount = singbox.getActiveDeviceCountForInbound(inbound.tag);
+  const isSingleClient = (inbound.clients?.length || 0) <= 1;
+  const enrichedClients = (inbound.clients || []).map((c) => {
+    const cKey = c.email || c.name || c.username || 'default';
+    const cIps = singbox.getActiveIpsForClient(inbound.tag, cKey, isSingleClient);
+    const cDevCount = singbox.getActiveDeviceCountForClient(inbound.tag, cKey, isSingleClient);
+    return {
+      ...c,
+      activeIps: cIps,
+      activeIpCount: cIps.length,
+      activeDeviceCount: cDevCount
+    };
+  });
   return {
     ...inbound,
+    clients: enrichedClients,
     activeIps,
     activeIpCount: activeIps.length,
     activeDeviceCount,
@@ -1102,7 +1125,14 @@ async function handleRequest(req, res) {
       store.transact(() => {
         existing.up = 0;
         existing.down = 0;
-        for (const c of existing.clients || []) { c.up = 0; c.down = 0; }
+        for (const c of existing.clients || []) {
+          c.up = 0;
+          c.down = 0;
+          if (c.enable === false && c.disabledReason === 'quota') {
+            c.enable = true;
+            delete c.disabledReason;
+          }
+        }
         if (existing.enable === false && existing.disabledReason === 'quota') {
           existing.enable = true;
           delete existing.disabledReason;
@@ -1111,6 +1141,160 @@ async function handleRequest(req, res) {
       });
       autoApplyIfEnabled();
       return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing, reqHostHeader) });
+    }
+
+    // Per-Client CRUD on Multi-User Inbounds (3x-ui / X-Panel compatible multi-user management)
+    const inbAddClient = route('/api/inbounds/:id/clients', pathname);
+    if (inbAddClient && method === 'POST') {
+      const existing = store.state.inbounds.find((x) => x.id === inbAddClient.id);
+      if (!existing) return sendError(res, 404, '未找到该入站节点');
+      const body = await readJson(req);
+      if (!Array.isArray(existing.clients)) existing.clients = [];
+      const email = String(body.email || body.name || `${existing.remark}_user_${existing.clients.length + 1}`).trim();
+      if (existing.clients.some((c) => c.email === email)) {
+        return sendError(res, 400, `该节点下已存在同名用户 [${email}]`);
+      }
+      const isUuidProto = ['vless', 'vmess', 'tuic'].includes(existing.protocol);
+      const rawPass = String(body.password || (existing.protocol === 'shadowsocks' ? generateSsKey(existing.method) : randomString(18))).trim();
+      const clientPass = existing.protocol === 'shadowsocks'
+        ? ensureSsPassword(existing.method, rawPass)
+        : rawPass;
+      const cTotalGB = Math.max(0, Number(body.totalGB || 0));
+      const cTotalBytes = cTotalGB > 0 ? Math.round(cTotalGB * (1024 ** 3)) : 0;
+      const cExpiry = parseExpiryTimeInput(body.expiryTime, 0);
+      const newClient = {
+        id: isUuidProto ? ensureUuid(body.uuid || body.id) : String(body.id || crypto.randomUUID()),
+        email,
+        username: String(body.username || email).trim(),
+        password: clientPass,
+        flow: existing.protocol === 'vless' ? String(body.flow ?? existing.flow ?? '') : '',
+        subId: String(body.subId || randomString(16)).trim(),
+        limitIp: Math.max(0, Number(body.limitIp || 0)),
+        limitDevice: Math.max(0, Number(body.limitDevice || 0)),
+        totalGB: cTotalGB,
+        totalBytes: cTotalBytes,
+        up: 0,
+        down: 0,
+        expiryTime: cExpiry,
+        enable: body.enable !== false
+      };
+      store.transact(() => {
+        existing.clients.push(newClient);
+        store.addAudit(session.username, 'add_inbound_client', `${existing.remark} -> ${email}`);
+      });
+      autoApplyIfEnabled();
+      return sendJson(res, 201, { inbound: enrichInboundWithLinks(existing, reqHostHeader), client: newClient });
+    }
+
+    const inbClientMatch = route('/api/inbounds/:id/clients/:clientId', pathname);
+    if (inbClientMatch && method === 'PUT') {
+      const existing = store.state.inbounds.find((x) => x.id === inbClientMatch.id);
+      if (!existing) return sendError(res, 404, '未找到该入站节点');
+      const client = (existing.clients || []).find((c) => c.id === inbClientMatch.clientId || c.email === inbClientMatch.clientId);
+      if (!client) return sendError(res, 404, '未找到该用户');
+      const body = await readJson(req);
+      const nextEmail = String(body.email || body.name || client.email).trim();
+      if ((existing.clients || []).some((c) => c !== client && c.email === nextEmail)) {
+        return sendError(res, 400, `该节点下已存在同名用户 [${nextEmail}]`);
+      }
+      store.transact(() => {
+        client.email = nextEmail;
+        if (body.username !== undefined) client.username = String(body.username).trim() || nextEmail;
+        if (['vless', 'vmess', 'tuic'].includes(existing.protocol) && (body.uuid || body.id)) {
+          client.id = ensureUuid(body.uuid || body.id);
+        }
+        if (body.password !== undefined && String(body.password).trim()) {
+          const rawPass = String(body.password).trim();
+          client.password = existing.protocol === 'shadowsocks' && existing.clients.length > 1
+            ? ensureSsPassword(existing.method, rawPass)
+            : rawPass;
+          if (existing.clients.length === 1 && ['anytls', 'hysteria2', 'trojan', 'shadowsocks', 'tuic'].includes(existing.protocol)) {
+            existing.password = client.password;
+          }
+        }
+        if (body.flow !== undefined && existing.protocol === 'vless') {
+          client.flow = String(body.flow).trim();
+        }
+        if (body.limitIp !== undefined) client.limitIp = Math.max(0, Number(body.limitIp || 0));
+        if (body.limitDevice !== undefined) client.limitDevice = Math.max(0, Number(body.limitDevice || 0));
+        if (body.totalGB !== undefined) {
+          client.totalGB = Math.max(0, Number(body.totalGB || 0));
+          client.totalBytes = client.totalGB > 0 ? Math.round(client.totalGB * (1024 ** 3)) : 0;
+        }
+        if (body.expiryTime !== undefined) {
+          client.expiryTime = parseExpiryTimeInput(body.expiryTime, 0);
+        }
+        if (body.enable !== undefined) {
+          client.enable = Boolean(body.enable);
+          if (client.enable) delete client.disabledReason;
+        }
+        store.addAudit(session.username, 'update_inbound_client', `${existing.remark} -> ${client.email}`);
+      });
+      autoApplyIfEnabled();
+      await singbox.pollConnectionsAndEnforceLimits().catch(() => {});
+      return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing, reqHostHeader), client });
+    }
+
+    if (inbClientMatch && method === 'DELETE') {
+      const existing = store.state.inbounds.find((x) => x.id === inbClientMatch.id);
+      if (!existing) return sendError(res, 404, '未找到该入站节点');
+      if ((existing.clients || []).length <= 1) {
+        return sendError(res, 400, '每个入站节点至少需保留 1 个用户（如需删除整个节点请点击节点删除按钮）');
+      }
+      const target = (existing.clients || []).find((c) => c.id === inbClientMatch.clientId || c.email === inbClientMatch.clientId);
+      if (!target) return sendError(res, 404, '未找到该用户');
+      singbox.clearClientLeases(existing.tag, target.email);
+      store.transact(() => {
+        existing.clients = existing.clients.filter((c) => c !== target);
+        store.addAudit(session.username, 'delete_inbound_client', `${existing.remark} -> ${target.email}`);
+      });
+      autoApplyIfEnabled();
+      return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing, reqHostHeader) });
+    }
+
+    const inbClientToggle = route('/api/inbounds/:id/clients/:clientId/toggle', pathname);
+    if (inbClientToggle && method === 'POST') {
+      const existing = store.state.inbounds.find((x) => x.id === inbClientToggle.id);
+      if (!existing) return sendError(res, 404, '未找到该入站节点');
+      const client = (existing.clients || []).find((c) => c.id === inbClientToggle.clientId || c.email === inbClientToggle.clientId);
+      if (!client) return sendError(res, 404, '未找到该用户');
+      store.transact(() => {
+        client.enable = client.enable === false;
+        if (client.enable) delete client.disabledReason;
+        else singbox.clearClientLeases(existing.tag, client.email);
+        store.addAudit(session.username, 'toggle_inbound_client', `${existing.remark} [${client.email}] -> ${client.enable ? '启用' : '停用'}`);
+      });
+      autoApplyIfEnabled();
+      return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing, reqHostHeader), client });
+    }
+
+    const inbClientReset = route('/api/inbounds/:id/clients/:clientId/reset-traffic', pathname);
+    if (inbClientReset && method === 'POST') {
+      const existing = store.state.inbounds.find((x) => x.id === inbClientReset.id);
+      if (!existing) return sendError(res, 404, '未找到该入站节点');
+      const client = (existing.clients || []).find((c) => c.id === inbClientReset.clientId || c.email === inbClientReset.clientId);
+      if (!client) return sendError(res, 404, '未找到该用户');
+      singbox.clearClientLeases(existing.tag, client.email);
+      store.transact(() => {
+        const oldUp = Number(client.up || 0);
+        const oldDown = Number(client.down || 0);
+        client.up = 0;
+        client.down = 0;
+        if ((existing.clients || []).length > 1) {
+          existing.up = Math.max(0, Number(existing.up || 0) - oldUp);
+          existing.down = Math.max(0, Number(existing.down || 0) - oldDown);
+        } else {
+          existing.up = 0;
+          existing.down = 0;
+        }
+        if (client.enable === false && client.disabledReason === 'quota') {
+          client.enable = true;
+          delete client.disabledReason;
+        }
+        store.addAudit(session.username, 'reset_client_traffic', `${existing.remark} [${client.email}]`);
+      });
+      autoApplyIfEnabled();
+      return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing, reqHostHeader), client });
     }
 
     // 9. Outbounds & Relay CRUD + URI Quick Parse + Batch URI Import + Traffic Reset

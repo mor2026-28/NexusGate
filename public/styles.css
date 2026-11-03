@@ -286,3 +286,80 @@ dialog::backdrop{background:rgba(15,22,36,.52);backdrop-filter:blur(3px)}
   #modal-body{padding:14px}
   .login-card{padding:26px 20px}
 }
+
+/* Multi-Client Expandable Sub-Table (3x-ui / X-Panel Multi-User View) */
+.row-expand-btn {
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 800;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-soft);
+  color: var(--text);
+  min-width: 44px;
+}
+.row-expand-btn.active {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.client-count-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--success) 35%, var(--line));
+  background: var(--success-soft);
+  color: var(--success);
+  transition: .14s;
+}
+.client-count-pill.multi {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--line));
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.client-count-pill:hover {
+  filter: brightness(0.96);
+}
+.client-subrow > td {
+  padding: 0 !important;
+  background: var(--surface-soft);
+  border-top: 1px dashed var(--line-strong);
+}
+.client-subbox {
+  padding: 10px 16px 12px 32px;
+  border-left: 3px solid var(--primary);
+}
+.client-subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.client-subtable {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 12px;
+}
+.client-subtable th {
+  padding: 7px 10px;
+  font-size: 10.5px;
+  background: var(--surface-soft);
+  border-bottom: 1px solid var(--line);
+}
+.client-subtable td {
+  padding: 7px 10px;
+  border-top: 1px solid var(--line);
+}

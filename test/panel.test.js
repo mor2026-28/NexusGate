@@ -519,3 +519,187 @@ test('7. Certificate failover switchover, deletion persistence, and SSH ng --sho
   assert.ok(!certsAfterDel.json.certificates.some((c) => c.domain === 'new-failover.example.com'), 'Deleted cert must not reappear');
   assert.equal(certsAfterDel.json.settings.webDomain, 'old-standby.example.com');
 });
+
+test('8. E2E Multi-Client Inbound Migration (client_alpha & client_beta), Per-Client CRUD, Per-Client Subscriptions & Independent Limits', async () => {
+  // 1. Build a 3x-ui / X-Panel SQLite DB containing row #20 "Multi-User-Node-20" (port 55011, vless + ws + TLS) with 2 clients:
+  //    - "client_alpha" (198.85 GB used, limitIp: 2)
+  //    - "client_beta" (6.66 GB used, limitIp: 2)
+  const multiDbPath = path.join(tmpDir, 'multi_client_xui.db');
+  const pyMulti = `
+import sqlite3, json, sys
+
+conn = sqlite3.connect(sys.argv[1])
+cur = conn.cursor()
+cur.execute("CREATE TABLE inbounds (id INTEGER PRIMARY KEY, user_id INT, up INT, down INT, total INT, remark TEXT, enable INT, expiry_time INT, traffic_reset TEXT, listen TEXT, port INT, protocol TEXT, settings TEXT, stream_settings TEXT, tag TEXT, sniffing TEXT)")
+cur.execute("CREATE TABLE client_traffics (id INTEGER PRIMARY KEY, inbound_id INT, enable INT, email TEXT, up INT, down INT, expiry_time INT, total INT)")
+cur.execute("CREATE TABLE outbound_traffics (id INTEGER PRIMARY KEY, tag TEXT, up INT, down INT, total INT)")
+cur.execute("CREATE TABLE settings (id INTEGER PRIMARY KEY, key TEXT, value TEXT)")
+
+settings = {
+  "clients": [
+    {
+      "id": "aaaaaaaa-1111-4222-8333-111111111111",
+      "flow": "",
+      "email": "client_alpha",
+      "limitIp": 2,
+      "totalGB": 0,
+      "expiryTime": 0,
+      "enable": True,
+      "subId": "sub_client_alpha_token16"
+    },
+    {
+      "id": "bbbbbbbb-2222-4333-8444-222222222222",
+      "flow": "",
+      "email": "client_beta",
+      "limitIp": 2,
+      "totalGB": 0,
+      "expiryTime": 0,
+      "enable": True,
+      "subId": "sub_yanzi_token1688"
+    }
+  ],
+  "decryption": "none"
+}
+stream = {
+  "network": "ws",
+  "security": "tls",
+  "tlsSettings": {
+    "serverName": "eb.example.com",
+    "certificates": [{"certificateFile": "/root/cert/eb.example.com/fullchain.pem", "keyFile": "/root/cert/eb.example.com/privkey.pem"}]
+  },
+  "wsSettings": {"path": "/ws-nice", "headers": {}}
+}
+
+cur.execute(
+  "INSERT INTO inbounds VALUES (20, 1, 1000000, 2000000, 0, 'Multi-User-Node-20', 1, 0, 'never', '', 55011, 'vless', ?, ?, 'inbound-55011', '{}')",
+  (json.dumps(settings), json.dumps(stream))
+)
+u1_bytes = int(198.85 * (1024**3))
+u2_bytes = int(6.66 * (1024**3))
+cur.execute("INSERT INTO client_traffics VALUES (1, 20, 1, 'client_alpha', ?, ?, 0, 0)", (u1_bytes // 10, u1_bytes - (u1_bytes // 10)))
+cur.execute("INSERT INTO client_traffics VALUES (2, 20, 1, 'client_beta', ?, ?, 0, 0)", (u2_bytes // 10, u2_bytes - (u2_bytes // 10)))
+conn.commit()
+conn.close()
+`;
+  const pyRun = spawnSync('python3', ['-c', pyMulti, multiDbPath], { encoding: 'utf8' });
+  assert.equal(pyRun.status, 0, pyRun.stderr);
+
+  const dbBuf = fs.readFileSync(multiDbPath);
+  const migRes = await req('/SecPath16Chars99/api/migrate/3xui?mode=merge', {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: dbBuf
+  });
+  assert.equal(migRes.status, 200);
+
+  // 2. Verify migrated inbound has both clients ("client_alpha" & "client_beta"), both share links, and Sing-box users array has both UUIDs
+  const inbRes = await req('/SecPath16Chars99/api/inbounds');
+  const niceInb = inbRes.json.inbounds.find((i) => i.port === 55011);
+  assert.ok(niceInb, 'Multi-User-Node-20 inbound on port 55011 must exist');
+  assert.equal(niceInb.clients.length, 2, 'Must preserve both clients on port 55011');
+  assert.equal(niceInb.clients[0].email, 'client_alpha');
+  assert.equal(niceInb.clients[1].email, 'client_beta');
+  assert.equal(niceInb.links.length, 2, 'Must generate 2 independent client share links');
+  assert.ok(niceInb.links[0].uri.includes('aaaaaaaa-1111-4222-8333-111111111111'));
+  assert.ok(niceInb.links[1].uri.includes('bbbbbbbb-2222-4333-8444-222222222222'));
+
+  const { config: sbCfg1 } = singbox.writeConfig();
+  const sbNice = sbCfg1.inbounds.find((i) => i.listen_port === 55011);
+  assert.equal(sbNice.users.length, 2, 'Sing-box inbound.users must contain both clients');
+  assert.equal(sbNice.users[0].name, 'client_alpha');
+  assert.equal(sbNice.users[1].name, 'client_beta');
+
+  // 3. Verify editing the inbound remark/outboundTag preserves BOTH clients intact without overwriting Client #2
+  const editInbRes = await req(`/SecPath16Chars99/api/inbounds/${niceInb.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      ...niceInb,
+      remark: 'Multi-User-Node-20-已核验'
+    })
+  });
+  assert.equal(editInbRes.status, 200);
+  assert.equal(editInbRes.json.inbound.clients.length, 2);
+  assert.equal(editInbRes.json.inbound.clients[1].email, 'client_beta');
+  assert.equal(editInbRes.json.inbound.clients[1].id, 'bbbbbbbb-2222-4333-8444-222222222222');
+
+  // 4. Verify per-client subscription URLs return only that specific client's node and individual traffic stats
+  const sub1Res = await req('/sub/sub_client_alpha_token16?format=clash');
+  assert.equal(sub1Res.status, 200);
+  assert.ok(sub1Res.text.includes('client_alpha'));
+  assert.ok(!sub1Res.text.includes('client_beta'), 'Client 1 subscription must NOT leak Client 2 node');
+
+  const sub2Res = await req('/sub/sub_yanzi_token1688?format=clash');
+  assert.equal(sub2Res.status, 200);
+  assert.ok(sub2Res.text.includes('client_beta'));
+  assert.ok(!sub2Res.text.includes('client_alpha'), 'Client 2 subscription must NOT leak Client 1 node');
+
+  // 5. Verify per-client CRUD: Add a 3rd client, toggle it, reset traffic, and delete it
+  const addClientRes = await req(`/SecPath16Chars99/api/inbounds/${niceInb.id}/clients`, {
+    method: 'POST',
+    body: JSON.stringify({
+      email: 'vip_third_user',
+      limitIp: 1,
+      limitDevice: 1,
+      totalGB: 50
+    })
+  });
+  assert.equal(addClientRes.status, 201);
+  assert.equal(addClientRes.json.inbound.clients.length, 3);
+  const thirdClient = addClientRes.json.client;
+
+  const toggleClientRes = await req(`/SecPath16Chars99/api/inbounds/${niceInb.id}/clients/${encodeURIComponent(thirdClient.id)}/toggle`, {
+    method: 'POST'
+  });
+  assert.equal(toggleClientRes.status, 200);
+  assert.equal(toggleClientRes.json.client.enable, false);
+
+  // When 3rd client is disabled, Sing-box config has 2 active users ("client_alpha" and "client_beta")
+  const { config: sbCfg2 } = singbox.writeConfig();
+  assert.equal(sbCfg2.inbounds.find((i) => i.listen_port === 55011).users.length, 2);
+
+  const delClientRes = await req(`/SecPath16Chars99/api/inbounds/${niceInb.id}/clients/${encodeURIComponent(thirdClient.id)}`, {
+    method: 'DELETE'
+  });
+  assert.equal(delClientRes.status, 200);
+  assert.equal(delClientRes.json.inbound.clients.length, 2);
+
+  // 6. Verify per-client independent limitIp enforcement on multi-client inbound:
+  //    "client_alpha" has limitIp=2, "client_beta" has limitIp=2 -> 2 IPs for client_alpha + 2 IPs for client_beta (4 IPs total) are ALL allowed!
+  //    Only a 3rd IP for "client_alpha" is blocked!
+  const closedMultiIds = [];
+  const mockMultiConns = [
+    { id: 'c-u1-ip1', metadata: { network: 'tcp', type: 'vless/inbound-55011', user: 'client_alpha', sourceIP: '198.18.0.1', sourcePort: '40001' }, upload: 100, download: 200, chains: ['direct'] },
+    { id: 'c-u1-ip2', metadata: { network: 'tcp', type: 'vless/inbound-55011', user: 'client_alpha', sourceIP: '198.18.0.2', sourcePort: '40002' }, upload: 100, download: 200, chains: ['direct'] },
+    { id: 'c-u2-ip1', metadata: { network: 'tcp', type: 'vless/inbound-55011', user: 'client_beta', sourceIP: '198.18.0.3', sourcePort: '40003' }, upload: 100, download: 200, chains: ['direct'] },
+    { id: 'c-u2-ip2', metadata: { network: 'tcp', type: 'vless/inbound-55011', user: 'client_beta', sourceIP: '198.18.0.4', sourcePort: '40004' }, upload: 100, download: 200, chains: ['direct'] },
+    { id: 'c-u1-ip3-excess', metadata: { network: 'tcp', type: 'vless/inbound-55011', user: 'client_alpha', sourceIP: '198.18.0.5', sourcePort: '40005' }, upload: 100, download: 200, chains: ['direct'] }
+  ];
+  const mockClash = http.createServer((reqM, resM) => {
+    if (reqM.method === 'GET' && reqM.url === '/connections') {
+      resM.writeHead(200, { 'content-type': 'application/json' });
+      resM.end(JSON.stringify({ connections: mockMultiConns }));
+    } else if (reqM.method === 'DELETE' && reqM.url.startsWith('/connections/')) {
+      closedMultiIds.push(decodeURIComponent(reqM.url.slice('/connections/'.length)));
+      resM.writeHead(204);
+      resM.end();
+    }
+  });
+  await new Promise((r) => mockClash.listen(0, '127.0.0.1', r));
+  store.state.settings.clashApiPort = mockClash.address().port;
+  try {
+    await singbox.pollConnectionsAndEnforceLimits(new Date());
+    await new Promise((r) => setTimeout(r, 80));
+    assert.ok(closedMultiIds.includes('c-u1-ip3-excess'), '3rd IP of client_alpha must be blocked');
+    assert.ok(
+      !closedMultiIds.includes('c-u1-ip1') &&
+      !closedMultiIds.includes('c-u1-ip2') &&
+      !closedMultiIds.includes('c-u2-ip1') &&
+      !closedMultiIds.includes('c-u2-ip2'),
+      'Both client_alpha (2 IPs) and client_beta (2 IPs) must remain online without interfering with each other'
+    );
+    assert.equal(singbox.getActiveDeviceCountForClient('inbound-55011', 'client_alpha', false), 2);
+    assert.equal(singbox.getActiveDeviceCountForClient('inbound-55011', 'client_beta', false), 2);
+  } finally {
+    await new Promise((r) => mockClash.close(r));
+  }
+});
