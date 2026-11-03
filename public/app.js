@@ -253,7 +253,7 @@ function setPage(page) {
     inbounds: '入站节点管理',
     routing: '路由规则 (转发)',
     outbounds: '出站规则 (中转)',
-    migrate: '3x-ui 无损迁移',
+    migrate: '备份迁移',
     certificates: 'SSL 证书与订阅',
     settings: '面板设置与安全'
   };
@@ -314,8 +314,8 @@ function renderOverview() {
   return `
     ${ov.local3xuiExists ? `
       <div class="notice" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-        <div><b>检测到本机存在 3x-ui 数据 (/etc/x-ui/x-ui.db 或 /root/3xui_backup.tar.gz)</b> · 可一键无损迁移全部入站节点、客户端凭据、路由转发、中转出站与 SSL 证书，不影响现有客户连接。</div>
-        <button class="primary" data-action="jump-migrate">前往一键无损迁移 →</button>
+        <div><b>检测到本机存在可迁移备份数据 (/etc/x-ui/x-ui.db 或 /root/3xui_backup.tar.gz)</b> · 可一键备份迁移全部入站节点、客户端凭据、路由转发、中转出站与 SSL 证书，不影响现有客户连接。</div>
+        <button class="primary" data-action="jump-migrate">前往备份迁移 →</button>
       </div>
     ` : ''}
 
@@ -425,7 +425,7 @@ function renderOverview() {
 
           <div style="padding-top:10px;border-top:1px solid var(--line)">
             <label>
-              更换 / 升级 Sing-box 内核版本 (官方 Release 自动匹配架构下载)
+              <span>更换 / 升级 Sing-box 内核版本 (官方 Release 自动匹配架构下载)</span>
               <div class="input-row" style="margin-top:4px">
                 <select id="sb-version-select" style="max-width:155px">
                   ${versionOptions}
@@ -442,7 +442,7 @@ function renderOverview() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>最近操作审计日志</h2><p>记录面板登录、节点变更、内核加速、路由转发与数据迁移事件</p></div>
+        <div><h2>最近操作审计日志</h2><p>记录面板登录、节点变更、内核加速、路由转发与备份迁移事件</p></div>
         <div style="display:flex;gap:8px">
           <button class="primary" data-action="quick-add-inbound">＋ 添加入站节点</button>
           <button class="ghost" data-action="Switch-to-routing">◇ 路由转发管理</button>
@@ -523,6 +523,9 @@ function renderInbounds() {
     const totalQuota = item.total > 0 ? ` / ${fmtBytes(item.total)}` : '';
     const effResetDay = Number(item.resetDay || state.settings?.trafficResetDay || 0);
     const resetBadge = effResetDay > 0 ? `<span class="tag" style="margin-left:4px">↻ 每月${effResetDay}号清零</span>` : '';
+    const onlineBadge = (activeDevCount > 0 || activeIpCount > 0)
+      ? `<span class="tag tls" style="margin-left:4px" title="当前在线客户端 IP: ${esc((item.activeIps || []).join(', '))}">● 在线 ${activeDevCount} 设备</span>`
+      : '';
 
     let expiryHtml = '<small class="muted">到期: 永久有效 · ';
     if (item.expiryTime && item.expiryTime > 0) {
@@ -534,7 +537,9 @@ function renderInbounds() {
         expiryHtml = `<small style="color:var(--primary)">⏱ 到期: ${fmtDate(item.expiryTime)} (剩${daysLeft}天) · `;
       }
     }
-    const limitText = `${expiryHtml}IP: <b>${activeIpCount}</b>/${limitIp > 0 ? limitIp : '∞'} · 设备: <b>${activeDevCount}</b>/${limitDevice > 0 ? limitDevice : '∞'}</small>`;
+    const ipStyle = activeIpCount > 0 ? 'color:var(--success);font-weight:800' : '';
+    const devStyle = activeDevCount > 0 ? 'color:var(--success);font-weight:800' : '';
+    const limitText = `${expiryHtml}IP: <b style="${ipStyle}">${activeIpCount}</b>/${limitIp > 0 ? limitIp : '∞'} · 设备: <b style="${devStyle}">${activeDevCount}</b>/${limitDevice > 0 ? limitDevice : '∞'}</small>`;
 
     return `
       <tr>
@@ -551,7 +556,7 @@ function renderInbounds() {
         <td><strong>:${esc(item.port)}</strong></td>
         <td>${relayHtml}</td>
         <td>
-          <div><span class="status valid">↑ ${fmtBytes(item.up)} / ↓ ${fmtBytes(item.down)}${esc(totalQuota)}</span>${resetBadge}</div>
+          <div><span class="status valid">↑ ${fmtBytes(item.up)} / ↓ ${fmtBytes(item.down)}${esc(totalQuota)}</span>${onlineBadge}${resetBadge}</div>
           ${limitText}
         </td>
         <td>
@@ -911,10 +916,10 @@ function renderMigrate() {
     <article class="panel" style="border-color:var(--primary)">
       <div class="panel-head">
         <div>
-          <h2>3x-ui / X-Panel 备份解析预览结果</h2>
+          <h2>备份数据解析预览结果</h2>
           <p>解析成功！共识别到 ${preview.summary.inboundsCount} 个入站 (${preview.summary.clientsCount} 个客户端)、${preview.summary.outboundsCount} 个自定义中转出站、${preview.summary.rulesCount} 条分流规则${preview.summary.restoredCertsCount ? `、${preview.summary.restoredCertsCount} 张 SSL 域名证书 (${(preview.summary.restoredCertDomains || []).join(', ')})` : ''}${preview.summary.acmeRestored ? ' (含 .acme.sh 自动续签配置)' : ''}</p>
         </div>
-        <span class="status valid">可 100% 无损迁移</span>
+        <span class="status valid">可完整迁移恢复</span>
       </div>
       <div class="panel-body stack">
         <div class="codebox" style="max-height:220px">${esc(JSON.stringify({
@@ -943,7 +948,7 @@ function renderMigrate() {
     <section class="grid-2">
       <article class="panel">
         <div class="panel-head">
-          <div><h2>方式一：上传 x-ui.db / 通用 .tar.gz 备份包 或读取本机</h2><p>支持直接上传 x-ui.db 数据库、或包含 /etc/x-ui/x-ui.db + /root/cert + /root/.acme.sh 的 .tar.gz 备份包，完整还原全部节点、中转出站、路由规则与 SSL 自动续签证书</p></div>
+          <div><h2>方式一：上传备份文件 (x-ui.db / .tar.gz) 或读取本机</h2><p>支持直接上传 x-ui.db 数据库、或包含 /etc/x-ui/x-ui.db + /root/cert + /root/.acme.sh 的 .tar.gz 备份包，完整还原全部节点、中转出站、路由规则与 SSL 自动续签证书</p></div>
         </div>
         <div class="panel-body stack">
           <label class="upload-dropzone" for="xui-db-file">
@@ -953,7 +958,7 @@ function renderMigrate() {
           </label>
 
           <label>
-            迁移合并策略
+            <span>迁移合并策略</span>
             <select id="migrate-mode">
               <option value="merge">智能合并（保留当前面板已有节点，同端口/同Tag自动更新）</option>
               <option value="replace">完整替换（清空当前节点，完整还原导入的入站、出站与路由转发）</option>
@@ -962,17 +967,17 @@ function renderMigrate() {
 
           <div style="display:flex;flex-wrap:wrap;gap:8px">
             <button data-action="preview-xui-file">🔍 预览上传文件解析结果</button>
-            <button class="primary" data-action="apply-xui-file">🚀 上传并立即执行无损迁移</button>
+            <button class="primary" data-action="apply-xui-file">🚀 上传并立即执行备份迁移</button>
           </div>
 
           <div style="padding-top:12px;border-top:1px solid var(--line)">
             <label>
-              或者直接从服务器本机路径读取 (支持 <code>/etc/x-ui/x-ui.db</code> 或 <code>/root/3xui_backup.tar.gz</code>)
+              <span>或者直接从服务器本机路径读取 (支持 <code>/etc/x-ui/x-ui.db</code> 或 <code>/root/3xui_backup.tar.gz</code>)</span>
               <div class="input-row" style="margin-top:4px">
                 <input id="local-xui-path" value="/etc/x-ui/x-ui.db" placeholder="/etc/x-ui/x-ui.db 或 /root/3xui_backup.tar.gz">
                 <button class="primary" data-action="migrate-local-xui">一键迁移本机数据</button>
               </div>
-              <small>本机状态: ${state.overview?.local3xuiExists ? '✅ 已检测到本机 3x-ui 数据库或备份包' : '可填入服务器上的 .db 或 .tar.gz 路径一键读取'}</small>
+              <small>本机状态: ${state.overview?.local3xuiExists ? '✅ 已检测到本机备份数据库或压缩包' : '可填入服务器上的 .db 或 .tar.gz 路径一键读取'}</small>
             </label>
           </div>
         </div>
@@ -984,12 +989,12 @@ function renderMigrate() {
         </div>
         <div class="panel-body stack">
           <label>
-            配置 JSON 内容
+            <span>配置 JSON 内容</span>
             <textarea id="xui-json-input" style="min-height:190px" placeholder='{"inbounds": [...], "outbounds": [...], "routing": {"rules": [...]}}'></textarea>
           </label>
           <div style="display:flex;justify-content:flex-end;gap:8px">
             <button data-action="preview-xui-json">🔍 预览 JSON 解析</button>
-            <button class="primary" data-action="apply-xui-json">🚀 从 JSON 执行无损迁移</button>
+            <button class="primary" data-action="apply-xui-json">🚀 从 JSON 执行备份迁移</button>
           </div>
         </div>
       </article>
@@ -997,7 +1002,7 @@ function renderMigrate() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>历史迁移记录</h2><p>历次数据与证书无损导入审计</p></div>
+        <div><h2>历史迁移记录</h2><p>历次数据与证书迁移导入审计</p></div>
       </div>
       <div class="table-wrap">
         <table>
@@ -1297,7 +1302,7 @@ function renderSettings() {
             </div>
             <div class="command-item">
               <div>
-                <b>一键无损迁移本机 3x-ui 数据库或备份包</b>
+                <b>一键备份迁移恢复本机数据库或通用备份包</b>
                 <code>ng migrate</code>
               </div>
               <button data-copy="ng migrate">复制</button>
@@ -1458,7 +1463,7 @@ async function openInboundModal(existing = null, preset = '') {
       <label>
         限制同时在线设备数 (0 = 不限制)
         <input name="limitDevice" type="number" min="0" max="2000" value="${esc(item.limitDevice || 0)}" placeholder="0 表示不限制设备台数">
-        <small>支持区分同路由器/NAT 下的多台手机或电脑设备，超出台数自动断开</small>
+        <small>超出设定在线设备台数的新连接将被实时拦截并断开</small>
       </label>
 
       <label>
@@ -1499,7 +1504,7 @@ async function openInboundModal(existing = null, preset = '') {
     `
   );
 
-  const renderDynamicFields = () => {
+  const renderDynamicFields = async () => {
     const proto = $('#inb-proto-select').value;
     const box = $('#inb-dynamic-fields');
     if (!box) return;
@@ -1549,6 +1554,23 @@ async function openInboundModal(existing = null, preset = '') {
           <input name="clientEmail" value="${esc(c0.email || 'ss_client_1')}">
         </label>
       `;
+
+      const refreshSsKeyForMethod = async () => {
+        const curMethod = $('#inb-ss-method')?.value || '2022-blake3-aes-128-gcm';
+        try {
+          const sk = await api('/api/tools/ss-key', { method: 'POST', body: JSON.stringify({ method: curMethod }) });
+          if ($('#inb-ss-pass')) {
+            $('#inb-ss-pass').value = sk.password;
+            item.password = sk.password;
+            item.method = curMethod;
+          }
+        } catch { /* ignore */ }
+      };
+
+      if (!existing && (!item.password || !item.password.endsWith('='))) {
+        refreshSsKeyForMethod();
+      }
+      $('#inb-ss-method')?.addEventListener('change', refreshSsKeyForMethod);
       return;
     }
 
@@ -2532,6 +2554,9 @@ document.addEventListener('click', async (e) => {
       if (r) openRuleModal(r);
     }
     else if (action === 'delete-rule') {
+      const r = (state.routing.rules || []).find((x) => x.id === actEl.dataset.id);
+      const label = r?.remark || (r?.inbound?.length ? `${r.inbound.join(', ')} ➔ ${r.outbound}` : actEl.dataset.id);
+      if (!confirm(`确认删除路由转发规则「${label}」吗？`)) return;
       await api(`/api/routing/rules/${actEl.dataset.id}`, { method: 'DELETE' });
       toast('路由规则已删除');
       load('routing');
@@ -2545,6 +2570,7 @@ document.addEventListener('click', async (e) => {
     }
     else if (action === 'routing-preset') {
       const preset = actEl.dataset.preset;
+      if (preset === '3xui-default' && !confirm('确认恢复默认防探测/禁BT规则吗？（将保留入站一对一中转规则，移除其他自定义分流规则）')) return;
       const selOut = $('#quick-relay-outbound')?.value;
       const customOut = (selOut && selOut !== 'direct')
         ? selOut
@@ -2609,7 +2635,7 @@ document.addEventListener('click', async (e) => {
       } else {
         state.migrationPreview = null;
         const certMsg = res.summary?.restoredCertsCount ? `、${res.summary.restoredCertsCount} 张 SSL 证书` : '';
-        toast(`🎉 无损迁移完成: 已导入 ${res.summary.inboundsCount} 个入站、${res.summary.outboundsCount} 个出站、${res.summary.rulesCount} 条规则${certMsg}！`);
+        toast(`🎉 备份迁移完成: 已导入 ${res.summary.inboundsCount} 个入站、${res.summary.outboundsCount} 个出站、${res.summary.rulesCount} 条规则${certMsg}！`);
         load('migrate');
       }
     }
@@ -2621,7 +2647,7 @@ document.addEventListener('click', async (e) => {
         body: JSON.stringify({ source: 'local', dbPath })
       });
       const certMsg = res.summary?.restoredCertsCount ? `、${res.summary.restoredCertsCount} 张 SSL 证书` : '';
-      toast(`🎉 本机数据无损迁移完成: 入站 ${res.summary.inboundsCount} 个，出站 ${res.summary.outboundsCount} 个${certMsg}`);
+      toast(`🎉 本机备份数据迁移完成: 入站 ${res.summary.inboundsCount} 个，出站 ${res.summary.outboundsCount} 个${certMsg}`);
       load('migrate');
     }
     else if (action === 'preview-xui-json' || action === 'apply-xui-json') {
@@ -2639,7 +2665,7 @@ document.addEventListener('click', async (e) => {
         render();
       } else {
         state.migrationPreview = null;
-        toast('🎉 从 JSON 无损迁移完成！');
+        toast('🎉 从 JSON 备份迁移完成！');
         load('migrate');
       }
     }
@@ -2738,6 +2764,7 @@ document.addEventListener('click', async (e) => {
       load('certificates');
     }
     else if (action === 'delete-cert') {
+      if (!confirm('确认移除该证书记录吗？')) return;
       await api(`/api/certificates/${actEl.dataset.id}`, { method: 'DELETE' });
       toast('证书记录已移除');
       load('certificates');
@@ -3032,8 +3059,9 @@ $('#sidebar-scrim')?.addEventListener('click', () => $('#app').classList.remove(
   }
 
   setInterval(() => {
-    if (state.session && state.page === 'overview' && !$('#modal')?.open) {
-      load('overview');
+    const isSearching = document.activeElement && document.activeElement.matches && document.activeElement.matches('[data-search]');
+    if (state.session && !$('#modal')?.open && !isSearching && ['overview', 'inbounds', 'outbounds'].includes(state.page)) {
+      load(state.page);
     }
-  }, 6000);
+  }, 4000);
 })();

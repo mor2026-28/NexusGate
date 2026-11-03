@@ -493,15 +493,17 @@ migrate_3xui() {
   local default_db="/etc/x-ui/x-ui.db"
   [[ ! -f "$default_db" && -f /root/3xui_backup.tar.gz ]] && default_db="/root/3xui_backup.tar.gz"
   local db_path=""
-  read -r -p "请输入 3x-ui 数据库或通用备份包路径 [默认 ${default_db}]: " db_path </dev/tty || true
+  read -r -p "请输入备份数据库或通用备份包路径 [默认 ${default_db}]: " db_path </dev/tty || true
   db_path="${db_path:-$default_db}"
-  systemctl stop nexusgate.service 2>/dev/null || true
+  systemctl stop nexusgate.service nexusgate-singbox.service 2>/dev/null || true
+  pkill -9 -f "sing-box run" 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --migrate-3xui "$db_path" merge
   if [[ -x /root/.acme.sh/acme.sh ]]; then
     /root/.acme.sh/acme.sh --install-cronjob >/dev/null 2>&1 || true
     systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null || true
   fi
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
+  systemctl reset-failed nexusgate.service nexusgate-singbox.service 2>/dev/null || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
 }
@@ -512,7 +514,8 @@ update_panel() {
   local tmp
   tmp="$(mktemp -d /tmp/ng-update.XXXXXX)"
   curl -fL --retry 3 "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz" -o "$tmp/src.tar.gz"
-  systemctl stop nexusgate.service 2>/dev/null || true
+  systemctl stop nexusgate.service nexusgate-singbox.service 2>/dev/null || true
+  pkill -9 -f "sing-box run" 2>/dev/null || true
   mkdir -p "$INSTALL_DIR"
   tar -xzf "$tmp/src.tar.gz" -C "$INSTALL_DIR" --strip-components=1
   install -m 0644 "$INSTALL_DIR/systemd/nexusgate.service" /etc/systemd/system/nexusgate.service
@@ -532,6 +535,7 @@ EOF
   systemctl restart systemd-journald 2>/dev/null || true
   journalctl --vacuum-size=32M >/dev/null 2>&1 || true
   systemctl daemon-reload 2>/dev/null || true
+  systemctl reset-failed nexusgate.service nexusgate-singbox.service 2>/dev/null || true
 
   if [[ -x /root/.acme.sh/acme.sh ]]; then
     /root/.acme.sh/acme.sh --install-cronjob >/dev/null 2>&1 || true
@@ -541,7 +545,7 @@ EOF
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
-  ok "NexusGate 面板与管理脚本已更新至 v2.6，所有节点与 Sing-box 内核已重新加载生效！"
+  ok "NexusGate 面板与管理脚本已更新至 v2.7，所有节点与 Sing-box 内核已重新加载生效！"
   show_info
   if [[ -r /dev/tty ]]; then
     pause_return
@@ -566,7 +570,7 @@ show_menu() {
   clear 2>/dev/null || true
   echo -e "
   ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
-  ${cyan}║${plain}     ${green}NexusGate · 枢门 Sing-box 轻量中转面板管理脚本 (v2.6)${plain}      ${cyan}║${plain}
+  ${cyan}║${plain}     ${green}NexusGate · 枢门 Sing-box 轻量中转面板管理脚本 (v2.7)${plain}      ${cyan}║${plain}
   ${cyan}║${plain}     ${yellow}全协议节点编排 · BBR+FQ+HY2 加速 · ACME 证书联动${plain}          ${cyan}║${plain}
   ${cyan}╚════════════════════════════════════════════════════════════════╝${plain}
   ${green}0.${plain} 退出脚本
@@ -600,7 +604,7 @@ show_menu() {
   ${green}22.${plain} 启用 BBR + FQ / HY2 UDP 高速内核加速
   ${green}23.${plain} 更新 Geo 分流规则文件
   ${green}24.${plain} Speedtest 测速工具
-  ${green}25.${plain} 一键无损迁移 3x-ui 全部节点与中转 (x-ui.db / 通用备份包)
+  ${green}25.${plain} 一键备份迁移 (导入 x-ui.db / 通用备份包恢复全部节点与证书)
   ${green}26.${plain} 一键清理系统日志与释放内存
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   面板状态: $(panel_status_text)
@@ -624,7 +628,7 @@ show_menu() {
     10) show_info ; pause_return ;;
     11) systemctl start nexusgate.service nexusgate-singbox.service && ok "已启动" ; pause_return ;;
     12) systemctl stop nexusgate.service nexusgate-singbox.service && ok "已停止" ; pause_return ;;
-    13) systemctl restart nexusgate.service nexusgate-singbox.service && ok "已重启" ; pause_return ;;
+    13) pkill -9 -f "sing-box run" 2>/dev/null || true ; systemctl reset-failed nexusgate.service nexusgate-singbox.service 2>/dev/null || true ; systemctl restart nexusgate.service nexusgate-singbox.service && ok "已重启" ; pause_return ;;
     14) systemctl status nexusgate.service nexusgate-singbox.service --no-pager || true ; pause_return ;;
     15) journalctl -u nexusgate.service -u nexusgate-singbox.service -n 80 --no-pager || true ; pause_return ;;
     16) systemctl enable nexusgate.service nexusgate-singbox.service && ok "已启用开机自启" ; pause_return ;;
@@ -646,7 +650,7 @@ if [[ $# -gt 0 ]]; then
   case "$1" in
     start) systemctl start nexusgate.service nexusgate-singbox.service ;;
     stop) systemctl stop nexusgate.service nexusgate-singbox.service ;;
-    restart) systemctl restart nexusgate.service nexusgate-singbox.service ;;
+    restart) pkill -9 -f "sing-box run" 2>/dev/null || true ; systemctl reset-failed nexusgate.service nexusgate-singbox.service 2>/dev/null || true ; systemctl restart nexusgate.service nexusgate-singbox.service ;;
     status) systemctl status nexusgate.service nexusgate-singbox.service --no-pager ;;
     info|settings) show_info ;;
     clean|cleanup) cleanup_memory_and_logs ;;

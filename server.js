@@ -24,6 +24,7 @@ const {
   OUTBOUND_PROTOCOLS,
   ensureUuid,
   normalizeSsMethod,
+  ensureSsPassword,
   isCertFileSelfSigned,
   generateRealityKeypair,
   deriveRealityPublicKey,
@@ -49,7 +50,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '2.6.0';
+const VERSION = '2.7.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -382,7 +383,7 @@ function handleCliCommand(args) {
     syncDiscoveredCerts();
     singbox.writeConfig();
     const certMsg = rec.restoredCertsCount ? `, 恢复证书 ${rec.restoredCertsCount} 张 (${rec.restoredCertDomains.join(', ')})` : '';
-    console.log(`成功从 ${dbPath} 无损迁移: 入站 ${rec.inboundsCount} 个 (${rec.clientsCount} 客户端), 出站 ${rec.outboundsCount} 个, 分流规则 ${rec.rulesCount} 条${certMsg}`);
+    console.log(`成功从 ${dbPath} 备份迁移: 入站 ${rec.inboundsCount} 个 (${rec.clientsCount} 客户端), 出站 ${rec.outboundsCount} 个, 分流规则 ${rec.rulesCount} 条${certMsg}`);
     return;
   }
 }
@@ -518,7 +519,7 @@ function normalizeInboundPayload(body, existing = null) {
     inbound.flow = String(body.flow ?? existing?.flow ?? (security === 'reality' && transport === 'tcp' ? 'xtls-rprx-vision' : '')).trim();
   } else if (protocol === 'shadowsocks') {
     inbound.method = normalizeSsMethod(body.method || existing?.method || '2022-blake3-aes-128-gcm');
-    inbound.password = String(body.password || existing?.password || generateSsKey(inbound.method)).trim();
+    inbound.password = ensureSsPassword(inbound.method, body.password || existing?.password || '');
     inbound.network = String(body.network || existing?.network || 'tcp,udp').trim();
   } else if (protocol === 'hysteria2') {
     inbound.password = String(body.password || existing?.password || randomString(20)).trim();
@@ -542,21 +543,27 @@ function normalizeInboundPayload(body, existing = null) {
   }
 
   if (Array.isArray(body.clients) && body.clients.length > 0) {
-    inbound.clients = body.clients.map((c, i) => ({
-      id: ensureUuid(c.id || c.uuid),
-      email: String(c.email || c.name || `${remark}_${i + 1}`).trim(),
-      username: String(c.username || c.email || `user_${i + 1}`).trim(),
-      password: String(c.password || inbound.password || inbound.socksPassword || randomString(18)).trim(),
-      flow: c.flow !== undefined ? c.flow : (inbound.flow || ''),
-      subId: String(c.subId || randomString(16)).trim(),
-      limitIp: Number(c.limitIp ?? inbound.limitIp ?? 0),
-      limitDevice: Number(c.limitDevice ?? inbound.limitDevice ?? 0),
-      totalGB: Number(c.totalGB || totalGB || 0),
-      up: Number(c.up || 0),
-      down: Number(c.down || 0),
-      expiryTime: Number(c.expiryTime || expiryTime || 0),
-      enable: c.enable !== false
-    }));
+    inbound.clients = body.clients.map((c, i) => {
+      const rawClientPass = String(c.password || inbound.password || inbound.socksPassword || randomString(18)).trim();
+      const clientPass = protocol === 'shadowsocks'
+        ? (body.clients.length === 1 ? inbound.password : ensureSsPassword(inbound.method, rawClientPass))
+        : rawClientPass;
+      return {
+        id: ensureUuid(c.id || c.uuid),
+        email: String(c.email || c.name || `${remark}_${i + 1}`).trim(),
+        username: String(c.username || c.email || `user_${i + 1}`).trim(),
+        password: clientPass,
+        flow: c.flow !== undefined ? c.flow : (inbound.flow || ''),
+        subId: String(c.subId || randomString(16)).trim(),
+        limitIp: Number(c.limitIp ?? inbound.limitIp ?? 0),
+        limitDevice: Number(c.limitDevice ?? inbound.limitDevice ?? 0),
+        totalGB: Number(c.totalGB || totalGB || 0),
+        up: Number(c.up || 0),
+        down: Number(c.down || 0),
+        expiryTime: Number(c.expiryTime || expiryTime || 0),
+        enable: c.enable !== false
+      };
+    });
   } else if (existing?.clients?.length && !body.resetClients) {
     inbound.clients = existing.clients.map((c, idx) => ({
       ...c,
@@ -900,6 +907,9 @@ async function handleRequest(req, res) {
     // 8. Inbounds CRUD + Batch Operations
     if (pathname === '/api/inbounds' && method === 'GET') {
       syncDiscoveredCerts();
+      if (Date.now() - singbox._lastPollAt > 1000) {
+        await singbox.pollConnectionsAndEnforceLimits().catch(() => {});
+      }
       const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
       return sendJson(res, 200, {
         inbounds: (store.state.inbounds || []).map((i) => enrichInboundWithLinks(i, reqHostHeader)),
@@ -929,6 +939,7 @@ async function handleRequest(req, res) {
             count += 1;
           } else if (act === 'disable-all' || act === 'disable-ids') {
             inb.enable = false;
+            singbox.clearInboundLeases(inb.tag);
             count += 1;
           } else if (act === 'reset-all-traffic' || act === 'reset-ids-traffic') {
             inb.up = 0;
@@ -982,12 +993,14 @@ async function handleRequest(req, res) {
       });
       openFirewallPorts([updated.port]);
       autoApplyIfEnabled();
+      await singbox.pollConnectionsAndEnforceLimits().catch(() => {});
       return sendJson(res, 200, { inbound: enrichInboundWithLinks(updated, reqHostHeader) });
     }
 
     if (inbMatch && method === 'DELETE') {
       const existing = store.state.inbounds.find((x) => x.id === inbMatch.id);
       if (!existing) return sendError(res, 404, '未找到该入站节点');
+      singbox.clearInboundLeases(existing.tag);
       store.transact((st) => {
         st.inbounds = st.inbounds.filter((x) => x.id !== inbMatch.id);
         st.routing.rules = (st.routing.rules || []).filter((r) => !(Array.isArray(r.inbound) && r.inbound.length === 1 && r.inbound[0] === existing.tag));
@@ -1004,6 +1017,7 @@ async function handleRequest(req, res) {
       store.transact(() => {
         existing.enable = !existing.enable;
         if (existing.enable) delete existing.disabledReason;
+        else singbox.clearInboundLeases(existing.tag);
         store.addAudit(session.username, 'toggle_inbound', `${existing.remark} -> ${existing.enable ? '启用' : '停用'}`);
       });
       autoApplyIfEnabled();
@@ -1030,6 +1044,9 @@ async function handleRequest(req, res) {
 
     // 9. Outbounds & Relay CRUD + URI Quick Parse + Batch URI Import + Traffic Reset
     if (pathname === '/api/outbounds' && method === 'GET') {
+      if (Date.now() - singbox._lastPollAt > 1000) {
+        await singbox.pollConnectionsAndEnforceLimits().catch(() => {});
+      }
       return sendJson(res, 200, {
         outbounds: (store.state.outbounds || []).map((o) => ({ ...o, singboxPreview: toSingboxOutbound(o) })),
         inbounds: store.state.inbounds || [],
@@ -1416,7 +1433,7 @@ async function handleRequest(req, res) {
       return sendJson(res, 201, { rules: store.state.routing.rules });
     }
 
-    // 11. 3x-ui Lossless Migration Endpoints
+    // 11. Backup Migration Endpoints
     if (pathname === '/api/migrate/3xui' && method === 'POST') {
       const contentType = String(req.headers['content-type'] || '');
       let parsed;
@@ -1440,7 +1457,7 @@ async function handleRequest(req, res) {
         } else if (body.jsonPayload) {
           parsed = parse3xuiPayload({ jsonPayload: typeof body.jsonPayload === 'string' ? JSON.parse(body.jsonPayload) : body.jsonPayload, dryRun });
         } else {
-          throw new Error('请上传 x-ui.db / 3xui_backup.tar.gz 文件、选择本机路径或粘贴 3x-ui JSON 配置');
+          throw new Error('请上传 x-ui.db / 3xui_backup.tar.gz 备份文件、选择本机路径或粘贴配置 JSON');
         }
       }
 
@@ -1453,7 +1470,7 @@ async function handleRequest(req, res) {
       syncDiscoveredCerts();
       store.transact(() => store.addAudit(
         session.username,
-        'migrate_3xui',
+        'backup_migrate',
         `入站 ${record.inboundsCount} 个 / 出站 ${record.outboundsCount} 个 / 规则 ${record.rulesCount} 条${record.restoredCertsCount ? ` / 证书 ${record.restoredCertsCount} 张` : ''}`
       ));
       const allPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
@@ -1786,7 +1803,7 @@ if (require.main === module) {
     }
     store.flushIfDirty();
   }, 60000).unref();
-  setInterval(() => singbox.pollConnectionsAndEnforceLimits().catch(() => {}), 5000).unref();
+  setInterval(() => singbox.pollConnectionsAndEnforceLimits().catch(() => {}), 2000).unref();
 
   const gracefulShutdown = () => {
     try { store.flushIfDirty(); } catch { /* ignore */ }

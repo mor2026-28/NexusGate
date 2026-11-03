@@ -147,7 +147,8 @@ configure_panel() {
   mkdir -p "$DATA_DIR" "$CONF_DIR/sing-box" "$CONF_DIR/certs" /root/cert
   chmod 0700 "$DATA_DIR" "$CONF_DIR"
 
-  systemctl stop nexusgate.service 2>/dev/null || true
+  systemctl stop nexusgate.service nexusgate-singbox.service 2>/dev/null || true
+  pkill -9 -f "sing-box run" 2>/dev/null || true
 
   local default_port default_user default_pass default_path
   default_port="$(gen_random_port)"
@@ -209,13 +210,13 @@ PY
   if [[ -f /etc/x-ui/x-ui.db || -f /root/3xui_backup.tar.gz ]]; then
     local found_xui="/etc/x-ui/x-ui.db"
     [[ ! -f "$found_xui" && -f /root/3xui_backup.tar.gz ]] && found_xui="/root/3xui_backup.tar.gz"
-    warn "检测到本机已存在 3x-ui 数据 (${found_xui})！"
+    warn "检测到本机已存在备份数据 (${found_xui})！"
     local do_mig="y"
     if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
-      read -r -p "是否立即无损迁移 3x-ui 全部入站节点、中转出站、分流规则与证书？[Y/n]: " do_mig </dev/tty || true
+      read -r -p "是否立即执行备份迁移恢复全部入站节点、中转出站、分流规则与证书？[Y/n]: " do_mig </dev/tty || true
     fi
     if [[ "${do_mig:-y}" =~ ^[Yy]?$ ]]; then
-      NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --migrate-3xui "$found_xui" merge || warn "自动迁移可在登录面板后通过【3x-ui 无损迁移】页面操作"
+      NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --migrate-3xui "$found_xui" merge || warn "自动迁移可在登录面板后通过【备份迁移】页面操作"
     fi
   fi
 
@@ -236,6 +237,7 @@ PY
 
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     systemctl daemon-reload
+    systemctl reset-failed nexusgate.service nexusgate-singbox.service 2>/dev/null || true
     systemctl enable --now nexusgate.service
     systemctl restart nexusgate.service
     systemctl enable --now nexusgate-singbox.service || true
@@ -252,7 +254,7 @@ PY
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.6 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate Sing-box 轻量中转面板 v2.7 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
   echo -e " 访问地址   : ${cyan}${login_url}${plain}"
   echo -e " 登录账号   : ${green}${admin_user}${plain}"

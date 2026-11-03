@@ -2,14 +2,15 @@
 Description=NexusGate Sing-box Lightweight Control Panel
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 EnvironmentFile=-/etc/nexusgate/nexusgate.env
 WorkingDirectory=/opt/nexusgate
 ExecStart=/usr/bin/node --expose-gc --max-old-space-size=128 /opt/nexusgate/server.js
-Restart=on-failure
-RestartSec=3
+Restart=always
+RestartSec=2
 LimitNOFILE=1048576
 MemoryMax=180M
 

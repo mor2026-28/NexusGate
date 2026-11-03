@@ -1,8 +1,8 @@
 {
   "name": "nexusgate-singbox",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "private": true,
-  "description": "NexusGate Sing-box 轻量级全协议节点与中转分流管理面板 (融合 NexusGate UI 与 3x-ui 核心能力)",
+  "description": "NexusGate Sing-box 轻量级全协议节点与中转分流管理面板",
   "type": "commonjs",
   "engines": {
     "node": ">=18"

@@ -8,7 +8,7 @@ const path = require('node:path');
 const http = require('node:http');
 const { spawnSync } = require('node:child_process');
 
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-test-v26-'));
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-test-v27-'));
 process.env.NG_DATA_FILE = path.join(tmpDir, 'nexusgate.json');
 process.env.NG_SINGBOX_CONFIG = path.join(tmpDir, 'sing-box-config.json');
 process.env.NG_ADMIN_USERNAME = 'ng_adminTest01';
@@ -68,7 +68,7 @@ test('1. Strict webBasePath security: bare IP:Port returns 404, only /SecPath16C
   csrf = loginRes.json.csrf;
 });
 
-test('2. Reality SNI excludes Cloudflare/Microsoft & Reality never gets certificate_path, TLS gets valid cert', async () => {
+test('2. Reality SNI excludes Cloudflare/Microsoft, SS-2022 enforces exact-length Base64 keys, and TLS gets valid cert', async () => {
   for (const preset of REALITY_PRESETS) {
     assert.ok(!/cloudflare|microsoft|bing/i.test(preset.serverName), `Forbidden SNI in presets: ${preset.serverName}`);
   }
@@ -84,9 +84,11 @@ test('2. Reality SNI excludes Cloudflare/Microsoft & Reality never gets certific
       protocol: p.startsWith('ss') ? 'shadowsocks' : (p === 'vless-reality' ? 'vless' : p),
       security: p === 'vless-reality' ? 'reality' : (['anytls', 'hysteria2'].includes(p) ? 'tls' : 'none'),
       method: p === 'ss2022-256' ? '2022-blake3-aes-256-gcm' : (p === 'ss-128' ? 'aes-128-gcm' : '2022-blake3-aes-128-gcm'),
+      // Pass a non-Base64 plain string to verify SS2022 automatically converts it into a valid 16/32-byte Base64 PSK
+      ...(p.startsWith('ss2022') ? { password: 'plain_password_not_base64_20chars' } : {}),
       ...(p === 'vless-reality' ? { reality: { serverName: 'www.cloudflare.com', target: 'www.cloudflare.com:443' } } : {}),
       limitIp: 2,
-      limitDevice: 5,
+      limitDevice: 2,
       totalGB: 100,
       resetDay: 15,
       expiryTime: Date.now() + 30 * 86400000
@@ -98,10 +100,17 @@ test('2. Reality SNI excludes Cloudflare/Microsoft & Reality never gets certific
     assert.equal(createRes.status, 201);
     const inb = createRes.json.inbound;
     assert.equal(inb.limitIp, 2);
-    assert.equal(inb.limitDevice, 5);
+    assert.equal(inb.limitDevice, 2);
     assert.equal(inb.resetDay, 15);
     assert.ok(inb.expiryTime > Date.now());
     assert.ok(inb.links.length > 0);
+
+    if (p === 'ss2022-256') {
+      assert.equal(Buffer.from(inb.password, 'base64').length, 32, 'SS2022-256 must have exact 32-byte Base64 PSK');
+      assert.equal(inb.clients[0].password, inb.password, 'Single-user SS2022 client password must match server PSK');
+    } else if (p === 'ss2022-128') {
+      assert.equal(Buffer.from(inb.password, 'base64').length, 16, 'SS2022-128 must have exact 16-byte Base64 PSK');
+    }
 
     if (p === 'vless-reality') {
       assert.equal(inb.reality.serverName, 'www.apple.com', 'Cloudflare SNI should automatically normalize to www.apple.com');
@@ -131,7 +140,89 @@ test('2. Reality SNI excludes Cloudflare/Microsoft & Reality never gets certific
   assert.ok(anytlsInb.tls.certificate_path && fs.existsSync(anytlsInb.tls.certificate_path), 'AnyTLS inbound must have existing certificate_path');
 });
 
-test('3. Monthly automatic traffic reset (resetDay 1..31), batch operations, and system memory/log cleanup', async () => {
+test('3. Sing-box Clash API metadata.type ("anytls/inbound-XXXX") traffic attribution + online IP/device tracking & limitDevice enforcement', async () => {
+  const anytlsInbound = store.state.inbounds.find((i) => i.protocol === 'anytls');
+  assert.ok(anytlsInbound);
+  anytlsInbound.limitIp = 0;
+  anytlsInbound.limitDevice = 2;
+  anytlsInbound.up = 0;
+  anytlsInbound.down = 0;
+
+  // Start a mock Sing-box Clash API server returning metadata.type = "anytls/<tag>"
+  const closedConnIds = [];
+  let mockConnections = [
+    {
+      id: 'conn-dev1-a',
+      metadata: { network: 'tcp', type: `anytls/${anytlsInbound.tag}`, sourceIP: '::ffff:203.0.113.10', sourcePort: '51001', destinationPort: '443', host: 'openai.com' },
+      upload: 4096,
+      download: 8192,
+      chains: ['direct']
+    },
+    {
+      // Same device (203.0.113.10) opening a second TCP connection on a distant ephemeral port — must still count as 1 device!
+      id: 'conn-dev1-b',
+      metadata: { network: 'tcp', type: `anytls/${anytlsInbound.tag}`, sourceIP: '203.0.113.10', sourcePort: '62005', destinationPort: '443', host: 'google.com' },
+      upload: 1024,
+      download: 2048,
+      chains: ['direct']
+    },
+    {
+      // 2nd device (203.0.113.20) — allowed since limitDevice = 2
+      id: 'conn-dev2-a',
+      metadata: { network: 'tcp', type: `anytls/${anytlsInbound.tag}`, sourceIP: '203.0.113.20', sourcePort: '53000', destinationPort: '443', host: 'github.com' },
+      upload: 2000,
+      download: 4000,
+      chains: ['direct']
+    },
+    {
+      // 3rd device (203.0.113.30) — exceeds limitDevice = 2, must be terminated immediately!
+      id: 'conn-dev3-excess',
+      metadata: { network: 'tcp', type: `anytls/${anytlsInbound.tag}`, sourceIP: '203.0.113.30', sourcePort: '54000', destinationPort: '443', host: 'youtube.com' },
+      upload: 500,
+      download: 500,
+      chains: ['direct']
+    }
+  ];
+
+  const mockClashServer = http.createServer((reqMock, resMock) => {
+    if (reqMock.method === 'GET' && reqMock.url === '/connections') {
+      resMock.writeHead(200, { 'content-type': 'application/json' });
+      resMock.end(JSON.stringify({ connections: mockConnections }));
+    } else if (reqMock.method === 'DELETE' && reqMock.url.startsWith('/connections/')) {
+      closedConnIds.push(decodeURIComponent(reqMock.url.slice('/connections/'.length)));
+      resMock.writeHead(204);
+      resMock.end();
+    } else {
+      resMock.writeHead(404);
+      resMock.end();
+    }
+  });
+
+  await new Promise((resolve) => mockClashServer.listen(0, '127.0.0.1', resolve));
+  const clashPort = mockClashServer.address().port;
+  store.state.settings.clashApiPort = clashPort;
+
+  try {
+    await singbox.pollConnectionsAndEnforceLimits(new Date());
+    // Wait briefly for async DELETE request to hit mockClashServer
+    await new Promise((r) => setTimeout(r, 80));
+
+    assert.equal(singbox.getActiveDeviceCountForInbound(anytlsInbound.tag), 2, 'Should show 2 online devices (not 3, and not splitting 1 device across ports)');
+    assert.deepEqual(singbox.getActiveIpsForInbound(anytlsInbound.tag), ['203.0.113.10', '203.0.113.20']);
+    assert.ok(closedConnIds.includes('conn-dev3-excess'), '3rd device connection must be closed via Clash API DELETE');
+    assert.ok(!closedConnIds.includes('conn-dev1-a') && !closedConnIds.includes('conn-dev1-b'), '1st device multiple sockets must NOT be false-killed');
+    assert.ok(anytlsInbound.up >= 7120 && anytlsInbound.down >= 14240, 'Inbound traffic must be accumulated from metadata.type');
+
+    // Even when active connections momentarily drop to [], 60s rolling lease keeps online count visible in UI
+    mockConnections = [];
+    await singbox.pollConnectionsAndEnforceLimits(new Date(Date.now() + 5000));
+    assert.equal(singbox.getActiveDeviceCountForInbound(anytlsInbound.tag), 2, 'Online devices should remain visible within 60s lease window');
+  } finally {
+    await new Promise((resolve) => mockClashServer.close(resolve));
+  }
+});
+
+test('4. Monthly automatic traffic reset (resetDay 1..31), batch operations, and system memory/log cleanup', async () => {
   const targetInb = store.state.inbounds[0];
   targetInb.resetDay = 15;
   targetInb.lastResetCycle = computeResetCycleKey(15, new Date('2026-11-16T10:00:00Z'));
@@ -162,7 +253,7 @@ test('3. Monthly automatic traffic reset (resetDay 1..31), batch operations, and
   assert.ok(Array.isArray(cleanRes.json.result.actions));
 });
 
-test('4. High-entropy subToken security (/sub/all returns 404) & clean CLI --show-info without username/subscription', async () => {
+test('5. High-entropy subToken security (/sub/all returns 404) & clean CLI --show-info without username/subscription', async () => {
   const subAllRes = await req('/sub/all?format=clash');
   assert.equal(subAllRes.status, 404, '/sub/all must be rejected with 404 to prevent scanning/leaks');
 
@@ -181,7 +272,6 @@ test('4. High-entropy subToken security (/sub/all returns 404) & clean CLI --sho
   assert.ok(subRes.text.includes('DOMAIN-SUFFIX,google.com,🔰 节点选择'));
   assert.ok(subRes.text.includes('GEOIP,CN,🎯 全球直连,no-resolve'));
 
-  // Test default CLI --show-info (must omit 登录账号 and 聚合订阅)
   const cliInfo = spawnSync(process.execPath, [path.join(__dirname, '..', 'server.js'), '--show-info'], {
     env: { ...process.env, NG_DATA_FILE: path.join(tmpDir, 'nexusgate.json') },
     encoding: 'utf8'
@@ -194,7 +284,7 @@ test('4. High-entropy subToken security (/sub/all returns 404) & clean CLI --sho
   assert.ok(!cliInfo.stdout.includes('聚合订阅'), '--show-info should NOT display 聚合订阅');
 });
 
-test('5. E2E Lossless Migration of Universal 3x-ui / X-Panel .tar.gz Archive (with sublink.db, x-ui.db, /root/cert, WS+TLS & Reality)', async () => {
+test('6. E2E Backup Migration of Universal .tar.gz Archive (with sublink.db, x-ui.db, /root/cert, WS+TLS & Reality)', async () => {
   const archiveBuildDir = path.join(tmpDir, 'archive_src');
   fs.mkdirSync(path.join(archiveBuildDir, 'etc', 'x-ui'), { recursive: true });
   fs.mkdirSync(path.join(archiveBuildDir, 'usr', 'local', 'bin', 'sublink', 'db'), { recursive: true });
@@ -206,7 +296,6 @@ test('5. E2E Lossless Migration of Universal 3x-ui / X-Panel .tar.gz Archive (wi
   const pyGen = `
 import sqlite3, json, sys
 
-# Create dummy sublink.db (no inbounds table) to ensure findXuiDbInDir ignores it
 c1 = sqlite3.connect(sys.argv[1])
 c1.execute("CREATE TABLE sub_logs (id INTEGER PRIMARY KEY, name TEXT)")
 c1.commit()
@@ -277,22 +366,22 @@ conn.close()
     body: tarBuf
   });
   assert.equal(migRes.status, 200);
-  assert.equal(migRes.json.summary.inboundsCount, 40, 'Must locate x-ui.db inside .tar.gz even when sublink.db is present');
+  assert.equal(migRes.json.summary.inboundsCount, 40);
   assert.equal(migRes.json.summary.outboundsCount, 3);
 
   const inbRes = await req('/SecPath16Chars99/api/inbounds');
   assert.equal(inbRes.status, 200);
   const wsInbound = inbRes.json.inbounds.find((i) => i.port === 40001);
-  assert.equal(wsInbound.tlsDomain, 'node.example.com', 'Empty serverName in 3x-ui WS+TLS should infer domain from /root/cert/<domain>/fullchain.pem');
+  assert.equal(wsInbound.tlsDomain, 'node.example.com');
   assert.ok(wsInbound.links[0].uri.includes('sni=node.example.com'));
   assert.ok(wsInbound.links[0].uri.includes('type=ws'));
 
   const realityInbound = inbRes.json.inbounds.find((i) => i.port === 40004);
-  assert.equal(realityInbound.reality.serverName, 'tesla.com', 'Migrated Reality node must preserve its existing SNI so existing clients are not broken');
+  assert.equal(realityInbound.reality.serverName, 'tesla.com');
 
   const { config } = singbox.writeConfig();
   const sbWsInb = config.inbounds.find((i) => i.listen_port === 40001);
-  assert.deepEqual(sbWsInb.tls.alpn, ['http/1.1'], 'WS+TLS inbound in Sing-box must force alpn: ["http/1.1"] so WebSocket Upgrade works');
+  assert.deepEqual(sbWsInb.tls.alpn, ['http/1.1']);
 
   const heapUsedMB = Math.round(process.memoryUsage().heapUsed / (1024 * 1024));
   assert.ok(heapUsedMB < 90, `Heap used (${heapUsedMB} MB) should stay well below 90MB`);
