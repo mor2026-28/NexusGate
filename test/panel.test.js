@@ -441,3 +441,81 @@ conn.close()
   const heapUsedMB = Math.round(process.memoryUsage().heapUsed / (1024 * 1024));
   assert.ok(heapUsedMB < 90, `Heap used (${heapUsedMB} MB) should stay well below 90MB`);
 });
+
+test('7. Certificate failover switchover, deletion persistence, and SSH ng --show-info sync', async () => {
+  // Create a mock Let's Encrypt CA so issued certs have issuer !== subject (isSelfSigned === false)
+  const caDir = path.join(tmpDir, 'ca');
+  fs.mkdirSync(caDir, { recursive: true });
+  const caKey = path.join(caDir, 'ca.key');
+  const caCert = path.join(caDir, 'ca.crt');
+  spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+    '-days', '3650', '-nodes', '-subj', '/C=US/O=Let\'s Encrypt/CN=E1',
+    '-keyout', caKey, '-out', caCert
+  ]);
+
+  const issueMockCaCert = (domain) => {
+    const dir = path.join(tmpDir, 'certs', domain);
+    fs.mkdirSync(dir, { recursive: true });
+    const keyPath = path.join(dir, 'privkey.pem');
+    const csrPath = path.join(dir, 'req.csr');
+    const certPath = path.join(dir, 'fullchain.pem');
+    spawnSync('openssl', [
+      'req', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+      '-nodes', '-subj', `/CN=${domain}`, '-keyout', keyPath, '-out', csrPath
+    ]);
+    spawnSync('openssl', [
+      'x509', '-req', '-in', csrPath, '-CA', caCert, '-CAkey', caKey,
+      '-CAcreateserial', '-out', certPath, '-days', '365'
+    ]);
+    return { certPath, keyPath };
+  };
+
+  // 1. Import initial cert "old-standby.example.com"
+  const oldC = issueMockCaCert('old-standby.example.com');
+  const resOld = await req('/SecPath16Chars99/api/certificates/custom', {
+    method: 'POST',
+    body: JSON.stringify({
+      domain: 'old-standby.example.com',
+      certPath: oldC.certPath,
+      keyPath: oldC.keyPath
+    })
+  });
+  assert.equal(resOld.status, 201);
+
+  // 2. Import new failover cert "new-failover.example.com"
+  const newC = issueMockCaCert('new-failover.example.com');
+  const resNew = await req('/SecPath16Chars99/api/certificates/custom', {
+    method: 'POST',
+    body: JSON.stringify({
+      domain: 'new-failover.example.com',
+      certPath: newC.certPath,
+      keyPath: newC.keyPath
+    })
+  });
+  assert.equal(resNew.status, 201);
+
+  // Verify SSH ng (--show-info) immediately reflects the newly imported "new-failover.example.com"
+  const cliAfterImport = spawnSync(process.execPath, [path.join(__dirname, '..', 'server.js'), '--show-info'], {
+    env: { ...process.env, NG_DATA_FILE: path.join(tmpDir, 'nexusgate.json') },
+    encoding: 'utf8'
+  });
+  assert.equal(cliAfterImport.status, 0);
+  assert.ok(cliAfterImport.stdout.includes('new-failover.example.com'), 'SSH --show-info must show newly imported cert domain');
+
+  // 3. Delete "new-failover.example.com" and verify it stays deleted and automatically switches back to old-standby.example.com
+  const certsListRes = await req('/SecPath16Chars99/api/certificates');
+  const newCertItem = certsListRes.json.certificates.find((c) => c.domain === 'new-failover.example.com');
+  assert.ok(newCertItem);
+
+  const delRes = await req(`/SecPath16Chars99/api/certificates/${encodeURIComponent(newCertItem.id)}`, {
+    method: 'DELETE'
+  });
+  assert.equal(delRes.status, 200);
+  assert.equal(delRes.json.deletedDomain, 'new-failover.example.com');
+  assert.equal(delRes.json.switchedDomain, 'old-standby.example.com');
+
+  const certsAfterDel = await req('/SecPath16Chars99/api/certificates');
+  assert.ok(!certsAfterDel.json.certificates.some((c) => c.domain === 'new-failover.example.com'), 'Deleted cert must not reappear');
+  assert.equal(certsAfterDel.json.settings.webDomain, 'old-standby.example.com');
+});

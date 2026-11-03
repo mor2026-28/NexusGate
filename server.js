@@ -50,7 +50,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '2.8.0';
+const VERSION = '2.9.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -62,8 +62,34 @@ const singbox = new SingboxManager(store);
 const loginAttempts = new Map();
 let activeServer = null;
 
-function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes = true) {
+function getActiveRealCert(st = store.state) {
+  const certs = st.certificates || [];
+  const s = st.settings || {};
+  return (
+    certs.find(
+      (c) =>
+        (c.certPath === s.webCertFile || c.certPath === s.defaultCertFile || (s.webDomain && c.domain === s.webDomain)) &&
+        c.type !== 'self-signed' &&
+        !c.isSelfSigned &&
+        c.valid !== false
+    ) ||
+    certs.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false) ||
+    null
+  );
+}
+
+function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes = true, forceAllTlsNodes = false) {
   const isRealAcme = cert.type !== 'self-signed' && !cert.isSelfSigned;
+  const prevDefaultDomain = st.settings.defaultTlsDomain || st.settings.webDomain || '';
+  const prevDefaultCert = st.settings.defaultCertFile || st.settings.webCertFile || '';
+
+  if (Array.isArray(st.settings.deletedCertDomains)) {
+    st.settings.deletedCertDomains = st.settings.deletedCertDomains.filter((d) => d !== cert.domain);
+  }
+  if (Array.isArray(st.settings.deletedCertPaths)) {
+    st.settings.deletedCertPaths = st.settings.deletedCertPaths.filter((p) => p !== cert.certPath);
+  }
+
   st.certificates = (st.certificates || []).filter((c) => {
     if (c.domain === 'www.bing.com') return false;
     if (c.domain === cert.domain || c.certPath === cert.certPath) return false;
@@ -77,6 +103,8 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
     st.settings.webKeyFile = cert.keyPath;
     if (isRealAcme && cert.domain && cert.domain !== 'www.apple.com') {
       st.settings.webDomain = cert.domain;
+    } else if (!isRealAcme && !st.settings.webDomain) {
+      st.settings.webDomain = '';
     }
   }
   if (applyToNodes) {
@@ -88,8 +116,17 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
         delete inb.certPath;
         delete inb.keyPath;
       } else if (inb.security === 'tls') {
-        const inbCertSelf = !inb.certPath || isCertFileSelfSigned(inb.certPath);
-        if (inbCertSelf || inb.tlsDomain === 'www.bing.com' || inb.tlsDomain === 'www.apple.com') {
+        const inbCertMissingOrSelf = !inb.certPath || !fs.existsSync(inb.certPath) || isCertFileSelfSigned(inb.certPath);
+        const matchesPreviousDefault =
+          (prevDefaultDomain && inb.tlsDomain === prevDefaultDomain) ||
+          (prevDefaultCert && inb.certPath === prevDefaultCert);
+        if (
+          forceAllTlsNodes ||
+          inbCertMissingOrSelf ||
+          matchesPreviousDefault ||
+          inb.tlsDomain === 'www.bing.com' ||
+          inb.tlsDomain === 'www.apple.com'
+        ) {
           inb.tlsDomain = cert.domain;
           inb.certPath = cert.certPath;
           inb.keyPath = cert.keyPath;
@@ -99,16 +136,24 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
   }
 }
 
-function syncDiscoveredCerts() {
-  const discovered = discoverSystemCertificates();
+function syncDiscoveredCerts(force = false) {
+  const discovered = discoverSystemCertificates(force);
   let changed = false;
   const prevPanelCert = store.state.settings.webCertFile || '';
+  const deletedDomains = new Set(store.state.settings.deletedCertDomains || []);
+  const deletedPaths = new Set(store.state.settings.deletedCertPaths || []);
 
   const beforeLen = store.state.certificates.length;
-  store.state.certificates = store.state.certificates.filter((c) => c.domain !== 'www.bing.com');
+  store.state.certificates = (store.state.certificates || []).filter((c) => {
+    if (c.domain === 'www.bing.com') return false;
+    if (deletedDomains.has(c.domain) || deletedPaths.has(c.certPath)) return false;
+    if (c.certPath && !fs.existsSync(c.certPath)) return false;
+    return true;
+  });
   if (store.state.certificates.length !== beforeLen) changed = true;
 
   for (const d of discovered) {
+    if (deletedDomains.has(d.domain) || deletedPaths.has(d.certPath)) continue;
     const existingIdx = store.state.certificates.findIndex((c) => c.certPath === d.certPath || c.domain === d.domain);
     if (existingIdx >= 0) {
       if (store.state.certificates[existingIdx].type === 'self-signed' && d.type !== 'self-signed') {
@@ -116,7 +161,8 @@ function syncDiscoveredCerts() {
         changed = true;
       }
     } else {
-      if (d.type !== 'self-signed') {
+      const hasRealAtTop = store.state.certificates.some((c) => c.type !== 'self-signed' && !c.isSelfSigned);
+      if (d.type !== 'self-signed' && !hasRealAtTop) {
         store.state.certificates.unshift(d);
       } else {
         store.state.certificates.push(d);
@@ -125,24 +171,43 @@ function syncDiscoveredCerts() {
     }
   }
 
-  const bestRealCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
-  if (bestRealCert) {
-    const curCert = store.state.settings.webCertFile || '';
-    const isCurSelfSigned = !curCert || isCertFileSelfSigned(curCert);
+  const hasAnyRealCert = store.state.certificates.some((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
+  if (hasAnyRealCert && store.state.certificates.some((c) => c.type === 'self-signed' || c.isSelfSigned)) {
+    store.state.certificates = store.state.certificates.filter((c) => c.type !== 'self-signed' && !c.isSelfSigned);
+    changed = true;
+  }
+
+  const curCertPath = store.state.settings.webCertFile || store.state.settings.defaultCertFile || '';
+  const activeRealCert = store.state.certificates.find(
+    (c) =>
+      (c.certPath === curCertPath || (store.state.settings.webDomain && c.domain === store.state.settings.webDomain)) &&
+      c.type !== 'self-signed' &&
+      !c.isSelfSigned &&
+      c.valid !== false
+  );
+
+  if (activeRealCert) {
     if (
-      isCurSelfSigned ||
-      store.state.settings.defaultTlsDomain !== bestRealCert.domain ||
-      store.state.certificates.some((c) => c.type === 'self-signed')
+      store.state.settings.webDomain !== activeRealCert.domain ||
+      store.state.settings.defaultTlsDomain !== activeRealCert.domain ||
+      store.state.settings.webCertFile !== activeRealCert.certPath ||
+      store.state.settings.defaultCertFile !== activeRealCert.certPath
     ) {
-      bindCertificateEverywhere(store.state, bestRealCert, true, true);
+      bindCertificateEverywhere(store.state, activeRealCert, true, true, false);
       changed = true;
     }
-  } else if (!store.state.settings.defaultCertFile && store.state.certificates[0]) {
-    const c0 = store.state.certificates[0];
-    store.state.settings.defaultTlsDomain = c0.domain;
-    store.state.settings.defaultCertFile = c0.certPath;
-    store.state.settings.defaultKeyFile = c0.keyPath;
-    changed = true;
+  } else {
+    const bestRealCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
+    if (bestRealCert) {
+      bindCertificateEverywhere(store.state, bestRealCert, true, true, true);
+      changed = true;
+    } else if (!store.state.settings.defaultCertFile && store.state.certificates[0]) {
+      const c0 = store.state.certificates[0];
+      store.state.settings.defaultTlsDomain = c0.domain;
+      store.state.settings.defaultCertFile = c0.certPath;
+      store.state.settings.defaultKeyFile = c0.keyPath;
+      changed = true;
+    }
   }
 
   if (changed) {
@@ -213,9 +278,13 @@ function syncRoutingRulesToInbounds(st) {
 
 function getPanelInfoSummary() {
   const s = store.state.settings;
-  const useHttps = Boolean(s.webCertFile && s.webKeyFile && fs.existsSync(s.webCertFile));
+  const activeCert = getActiveRealCert(store.state);
+  const certFile = (s.webCertFile && fs.existsSync(s.webCertFile)) ? s.webCertFile : (activeCert?.certPath || '');
+  const keyFile = (s.webKeyFile && fs.existsSync(s.webKeyFile)) ? s.webKeyFile : (activeCert?.keyPath || '');
+  const useHttps = Boolean(certFile && keyFile && fs.existsSync(certFile));
+  const activeDomain = activeCert?.domain || s.webDomain || s.defaultTlsDomain || '';
   const proto = useHttps ? 'https' : 'http';
-  const host = s.webDomain || s.publicIPv4 || '127.0.0.1';
+  const host = activeDomain || s.publicIPv4 || '127.0.0.1';
   const base = normalizeBasePath(s.webBasePath);
   const cleanUrl = `${proto}://${host}:${s.webPort}${base === '/' ? '/' : `${base}/`}`;
   const subPath = (s.subPath || '/sub/').replace(/\/+$/, '');
@@ -228,9 +297,9 @@ function getPanelInfoSummary() {
     basePath: base === '/' ? '/' : `${base}/`,
     strictBasePath: Boolean(s.strictBasePath),
     https: useHttps,
-    webDomain: s.webDomain || '',
-    certFile: s.webCertFile || '未绑定 (HTTP)',
-    defaultNodeTlsDomain: s.defaultTlsDomain || s.webDomain || 'www.apple.com',
+    webDomain: activeDomain,
+    certFile: certFile || '未绑定 (HTTP)',
+    defaultNodeTlsDomain: activeDomain || s.defaultTlsDomain || 'www.apple.com',
     url: cleanUrl,
     subUrl,
     inboundsCount: store.state.inbounds.length,
@@ -328,7 +397,7 @@ function handleCliCommand(args) {
   if (cmd === '--issue-selfsigned') {
     const domain = String(args[1] || store.state.settings.webDomain || 'www.apple.com').trim();
     const ip = String(args[2] || store.state.settings.publicIPv4 || '').trim();
-    const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
+    const realCert = getActiveRealCert(store.state);
     if (realCert && args[3] !== '--force') {
       store.transact((st) => {
         bindCertificateEverywhere(st, realCert, true, true);
@@ -339,7 +408,7 @@ function handleCliCommand(args) {
     }
     const cert = issueSelfSignedCert({ domain, ip, days: 3650 });
     store.transact((st) => {
-      bindCertificateEverywhere(st, cert, true, true);
+      bindCertificateEverywhere(st, cert, true, true, true);
     });
     singbox.writeConfig();
     console.log(`10 年自签证书已生成并自动绑定至面板 HTTPS 与 Sing-box 节点默认证书: ${cert.certPath}`);
@@ -359,7 +428,7 @@ function handleCliCommand(args) {
           certPath: certFile,
           keyPath: keyFile
         });
-        bindCertificateEverywhere(st, cert, true, true);
+        bindCertificateEverywhere(st, cert, true, true, true);
       }
     });
     singbox.writeConfig();
@@ -491,7 +560,7 @@ function normalizeInboundPayload(body, existing = null) {
   }
 
   if (security === 'tls') {
-    const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
+    const realCert = getActiveRealCert(store.state);
     const defDomain = realCert?.domain || store.state.settings.webDomain || store.state.settings.defaultTlsDomain || 'www.apple.com';
     const defCert = realCert?.certPath || store.state.settings.defaultCertFile || store.state.settings.webCertFile || '';
     const defKey = realCert?.keyPath || store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || '';
@@ -660,7 +729,7 @@ function normalizeOutboundPayload(body, existing = null) {
 
 function enrichInboundWithLinks(inbound, reqHost = '') {
   const cleanReqHost = String(reqHost || '').split(':')[0].replace(/^\[|\]$/g, '');
-  const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
+  const realCert = getActiveRealCert(store.state);
   const defaultHost = store.state.settings.webDomain || realCert?.domain || store.state.settings.publicIPv4 || cleanReqHost || '127.0.0.1';
   const activeIps = singbox.getActiveIpsForInbound(inbound.tag);
   const activeDeviceCount = singbox.getActiveDeviceCountForInbound(inbound.tag);
@@ -910,7 +979,7 @@ async function handleRequest(req, res) {
       if (Date.now() - singbox._lastPollAt > 1000) {
         await singbox.pollConnectionsAndEnforceLimits().catch(() => {});
       }
-      const realCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
+      const realCert = getActiveRealCert(store.state);
       return sendJson(res, 200, {
         inbounds: (store.state.inbounds || []).map((i) => enrichInboundWithLinks(i, reqHostHeader)),
         outbounds: store.state.outbounds || [],
@@ -1543,7 +1612,7 @@ async function handleRequest(req, res) {
       });
       const bindPanel = body.applyToPanel !== false;
       store.transact((st) => {
-        bindCertificateEverywhere(st, cert, bindPanel, true);
+        bindCertificateEverywhere(st, cert, bindPanel, true, true);
         store.addAudit(session.username, 'issue_selfsigned_cert', cert.domain);
       });
       autoApplyIfEnabled();
@@ -1562,7 +1631,7 @@ async function handleRequest(req, res) {
       });
       const bindPanel = body.applyToPanel !== false;
       store.transact((st) => {
-        bindCertificateEverywhere(st, cert, bindPanel, true);
+        bindCertificateEverywhere(st, cert, bindPanel, true, true);
         store.addAudit(session.username, 'save_custom_cert', cert.domain);
       });
       autoApplyIfEnabled();
@@ -1583,7 +1652,7 @@ async function handleRequest(req, res) {
       });
       const bindPanel = body.applyToPanel !== false;
       store.transact((st) => {
-        bindCertificateEverywhere(st, cert, bindPanel, true);
+        bindCertificateEverywhere(st, cert, bindPanel, true, true);
         store.addAudit(session.username, 'issue_acme_cert', `${cert.domain} (${cert.type})`);
       });
       autoApplyIfEnabled();
@@ -1596,7 +1665,7 @@ async function handleRequest(req, res) {
       const cert = store.state.certificates.find((c) => c.id === body.id || c.certPath === body.certPath);
       if (!cert) return sendError(res, 404, '未找到该证书');
       store.transact((st) => {
-        bindCertificateEverywhere(st, cert, true, true);
+        bindCertificateEverywhere(st, cert, true, true, true);
         store.addAudit(session.username, 'bind_cert_all', cert.domain);
       });
       autoApplyIfEnabled();
@@ -1606,11 +1675,80 @@ async function handleRequest(req, res) {
 
     const certMatch = route('/api/certificates/:id', pathname);
     if (certMatch && method === 'DELETE') {
+      syncDiscoveredCerts();
+      const prevPanelCert = store.state.settings.webCertFile || '';
+      let deletedDomain = '';
+      let switchedDomain = '';
       store.transact((st) => {
-        st.certificates = st.certificates.filter((c) => c.id !== certMatch.id);
-        store.addAudit(session.username, 'delete_cert', certMatch.id);
+        const target = (st.certificates || []).find((c) => c.id === certMatch.id || c.domain === certMatch.id);
+        if (!target) {
+          const err = new Error('未找到该证书记录');
+          err.statusCode = 404;
+          throw err;
+        }
+        deletedDomain = target.domain || '';
+        if (!Array.isArray(st.settings.deletedCertDomains)) st.settings.deletedCertDomains = [];
+        if (!Array.isArray(st.settings.deletedCertPaths)) st.settings.deletedCertPaths = [];
+        if (target.domain && !st.settings.deletedCertDomains.includes(target.domain)) {
+          st.settings.deletedCertDomains.push(target.domain);
+        }
+        if (target.certPath && !st.settings.deletedCertPaths.includes(target.certPath)) {
+          st.settings.deletedCertPaths.push(target.certPath);
+        }
+
+        st.certificates = (st.certificates || []).filter(
+          (c) => c.id !== target.id && c.domain !== target.domain && c.certPath !== target.certPath
+        );
+
+        for (const baseRoot of ['/etc/nexusgate/certs', '/root/cert']) {
+          if (target.domain && target.domain !== 'www.apple.com') {
+            try { fs.rmSync(path.join(baseRoot, target.domain), { recursive: true, force: true }); } catch { /* ignore */ }
+          }
+        }
+        if (target.certPath && (target.certPath.startsWith('/etc/nexusgate/certs/') || target.certPath.startsWith('/root/cert/'))) {
+          try { fs.rmSync(path.dirname(target.certPath), { recursive: true, force: true }); } catch { /* ignore */ }
+        }
+
+        const wasActive =
+          st.settings.webCertFile === target.certPath ||
+          st.settings.defaultCertFile === target.certPath ||
+          st.settings.webDomain === target.domain ||
+          st.settings.defaultTlsDomain === target.domain;
+
+        if (wasActive) {
+          const nextCert =
+            st.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false) ||
+            st.certificates[0] ||
+            null;
+          if (nextCert) {
+            bindCertificateEverywhere(st, nextCert, true, true, true);
+            switchedDomain = nextCert.domain;
+          } else {
+            st.settings.webDomain = '';
+            st.settings.webCertFile = '';
+            st.settings.webKeyFile = '';
+            st.settings.defaultTlsDomain = 'www.apple.com';
+            st.settings.defaultCertFile = '';
+            st.settings.defaultKeyFile = '';
+          }
+        }
+        store.addAudit(
+          session.username,
+          'delete_cert',
+          `${deletedDomain || certMatch.id}${switchedDomain ? ` (已自动切换默认证书至 ${switchedDomain})` : ''}`
+        );
       });
-      return sendJson(res, 200, { ok: true });
+      try { discoverSystemCertificates(true); } catch { /* ignore */ }
+      autoApplyIfEnabled();
+      if (store.state.settings.webCertFile !== prevPanelCert) {
+        setTimeout(() => restartPanelServer(), 300);
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        deletedDomain,
+        switchedDomain,
+        settings: store.state.settings
+      });
     }
 
     // 14. Panel Security & Settings
@@ -1786,11 +1924,14 @@ function startPanelServer(callback) {
 }
 
 function restartPanelServer() {
-  if (!activeServer) {
-    startPanelServer();
-    return;
-  }
-  activeServer.close(() => {
+  if (!activeServer) return;
+  const prev = activeServer;
+  activeServer = null;
+  try {
+    if (typeof prev.closeIdleConnections === 'function') prev.closeIdleConnections();
+    if (typeof prev.closeAllConnections === 'function') prev.closeAllConnections();
+  } catch { /* ignore */ }
+  prev.close(() => {
     startPanelServer();
   });
 }

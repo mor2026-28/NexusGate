@@ -197,14 +197,44 @@ async function loadCatalogOnce() {
   } catch { /* ignore */ }
 }
 
-async function load(page = state.page) {
+let currentLoadSeq = 0;
+let lastUserScrollAt = 0;
+let lastUserInteractAt = 0;
+
+window.addEventListener('scroll', () => { lastUserScrollAt = Date.now(); }, { passive: true });
+window.addEventListener('wheel', () => { lastUserScrollAt = Date.now(); }, { passive: true });
+window.addEventListener('touchmove', () => { lastUserScrollAt = Date.now(); }, { passive: true });
+window.addEventListener('pointerdown', () => { lastUserInteractAt = Date.now(); }, { passive: true });
+
+function getActiveCertObject() {
+  const certs = state.certificates || [];
+  const s = state.settings || {};
+  return (
+    certs.find(
+      (c) =>
+        (c.certPath === s.webCertFile || c.certPath === s.defaultCertFile || (s.webDomain && c.domain === s.webDomain)) &&
+        c.type !== 'self-signed' &&
+        !c.isSelfSigned &&
+        c.valid !== false
+    ) ||
+    certs.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false) ||
+    null
+  );
+}
+
+async function load(page = state.page, options = {}) {
+  const isSilent = Boolean(options.silent);
+  const seq = isSilent ? currentLoadSeq : ++currentLoadSeq;
   try {
     await loadCatalogOnce();
     if (page === 'overview') {
-      state.overview = await api('/api/overview');
+      const ov = await api('/api/overview');
+      if (page !== state.page || seq !== currentLoadSeq) return;
+      state.overview = ov;
       updateSidebarIndicator();
     } else if (page === 'inbounds') {
       const data = await api('/api/inbounds');
+      if (page !== state.page || seq !== currentLoadSeq) return;
       state.inbounds = data.inbounds || [];
       state.outbounds = data.outbounds || [];
       state.certificates = data.certificates || [];
@@ -212,40 +242,50 @@ async function load(page = state.page) {
       if (data.defaultSettings) state.defaultSettings = data.defaultSettings;
     } else if (page === 'routing') {
       const data = await api('/api/routing');
+      if (page !== state.page || seq !== currentLoadSeq) return;
       state.routing = data.routing || { final: 'direct', rules: [] };
       state.dns = data.dns || { strategy: 'prefer_ipv4' };
       state.inbounds = data.inbounds || [];
       state.outbounds = data.outbounds || [];
     } else if (page === 'outbounds') {
       const data = await api('/api/outbounds');
+      if (page !== state.page || seq !== currentLoadSeq) return;
       state.outbounds = data.outbounds || [];
       state.inbounds = data.inbounds || [];
       if (data.routing) state.routing = data.routing;
     } else if (page === 'migrate') {
       const [ov, st] = await Promise.all([api('/api/overview'), api('/api/settings')]);
+      if (page !== state.page || seq !== currentLoadSeq) return;
       state.overview = ov;
       state.settings = st.settings || state.settings;
       state.migrations = st.migrations || [];
     } else if (page === 'certificates') {
       const [certs, st, inbData] = await Promise.all([api('/api/certificates'), api('/api/settings'), api('/api/inbounds')]);
+      if (page !== state.page || seq !== currentLoadSeq) return;
       state.certificates = certs.certificates || [];
       state.settings = st.settings || {};
       state.inbounds = inbData.inbounds || [];
     } else if (page === 'settings') {
       const [st, certs] = await Promise.all([api('/api/settings'), api('/api/certificates')]);
+      if (page !== state.page || seq !== currentLoadSeq) return;
       state.settings = st.settings || {};
       state.admin = st.admin || {};
       state.certificates = certs.certificates || [];
     }
     render();
   } catch (err) {
-    toast(err.message, true);
+    if (!isSilent) toast(err.message, true);
   }
 }
 
 function setPage(page) {
+  const pageChanged = state.page !== page;
   state.page = page;
-  state.search = '';
+  currentLoadSeq += 1;
+  if (pageChanged) {
+    state.search = '';
+    window.scrollTo(0, 0);
+  }
   $('#app').classList.remove('sidebar-open');
   $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
   const titles = {
@@ -264,9 +304,10 @@ function setPage(page) {
 
 function getBaseSubscriptionUrl(subToken = '') {
   const s = state.settings || {};
+  const activeCert = getActiveCertObject();
   const token = (subToken && subToken !== 'all') ? subToken : (s.subToken || '');
   const proto = window.location.protocol;
-  const host = s.webDomain || window.location.hostname || s.publicIPv4 || '127.0.0.1';
+  const host = activeCert?.domain || s.webDomain || window.location.hostname || s.publicIPv4 || '127.0.0.1';
   const portPart = window.location.port ? `:${window.location.port}` : (s.webPort ? `:${s.webPort}` : '');
   const subPath = (s.subPath || '/sub/').replace(/\/+$/, '');
   return `${proto}//${host}${portPart}${subPath}/${encodeURIComponent(token)}`;
@@ -479,7 +520,8 @@ function renderInbounds() {
   const totalDown = state.inbounds.reduce((acc, i) => acc + Number(i.down || 0), 0);
   const activeCount = state.inbounds.filter((i) => i.enable !== false).length;
   const totalClients = state.inbounds.reduce((acc, i) => acc + (i.clients?.length || 0), 0);
-  const defaultDomain = state.defaultSettings?.defaultTlsDomain || state.settings?.webDomain || 'www.apple.com';
+  const activeCert = getActiveCertObject();
+  const defaultDomain = activeCert?.domain || state.defaultSettings?.defaultTlsDomain || state.settings?.webDomain || 'www.apple.com';
 
   const filterDefs = [
     ['all', `全部 (${state.inbounds.length})`],
@@ -1069,7 +1111,7 @@ function renderCertificates() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>SSL 证书管理列表 (${state.certificates.length} 张)</h2><p>当前默认证书域名: <b>${esc(s.webDomain || s.defaultTlsDomain || '未绑定域名')}</b></p></div>
+        <div><h2>SSL 证书管理列表 (${state.certificates.length} 张)</h2><p>当前默认证书域名: <b>${esc(getActiveCertObject()?.domain || s.webDomain || s.defaultTlsDomain || '未绑定域名')}</b></p></div>
       </div>
       <div class="table-wrap">
         <table>
@@ -1324,13 +1366,44 @@ function render() {
     certificates: renderCertificates,
     settings: renderSettings
   };
-  $('#content').innerHTML = (views[state.page] || renderOverview)();
+  const contentEl = $('#content');
+  if (!contentEl) return;
+
+  const prevWinY = window.scrollY;
+  const prevWinX = window.scrollX;
+  const prevTableScrolls = Array.from(contentEl.querySelectorAll('.table-wrap')).map((el) => ({
+    left: el.scrollLeft,
+    top: el.scrollTop
+  }));
+  const prevHeight = contentEl.offsetHeight;
+  if (prevHeight > 0 && prevWinY > 0) {
+    contentEl.style.minHeight = `${prevHeight}px`;
+  }
+
+  contentEl.innerHTML = (views[state.page] || renderOverview)();
+
+  const nextTables = contentEl.querySelectorAll('.table-wrap');
+  nextTables.forEach((el, idx) => {
+    if (prevTableScrolls[idx]) {
+      el.scrollLeft = prevTableScrolls[idx].left;
+      el.scrollTop = prevTableScrolls[idx].top;
+    }
+  });
+
+  if (prevWinY > 0 || prevWinX > 0) {
+    window.scrollTo(prevWinX, prevWinY);
+  }
+  if (contentEl.style.minHeight) {
+    requestAnimationFrame(() => {
+      contentEl.style.minHeight = '';
+    });
+  }
 }
 
 /* ==================== MODALS & ACTIONS ==================== */
 
 async function openInboundModal(existing = null, preset = '') {
-  const realCert = (state.certificates || []).find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
+  const realCert = getActiveCertObject();
   const defTlsDomain = realCert?.domain || state.settings?.webDomain || state.defaultSettings?.defaultTlsDomain || 'www.apple.com';
   const defCertFile = realCert?.certPath || state.defaultSettings?.defaultCertFile || state.settings?.webCertFile || '';
   const defKeyFile = realCert?.keyPath || state.defaultSettings?.defaultKeyFile || state.settings?.webKeyFile || '';
@@ -2764,9 +2837,13 @@ document.addEventListener('click', async (e) => {
       load('certificates');
     }
     else if (action === 'delete-cert') {
-      if (!confirm('确认移除该证书记录吗？')) return;
-      await api(`/api/certificates/${actEl.dataset.id}`, { method: 'DELETE' });
-      toast('证书记录已移除');
+      if (!confirm('确认移除该证书记录吗？（若该证书为当前默认证书，系统将自动切换至剩余可用证书）')) return;
+      const res = await api(`/api/certificates/${encodeURIComponent(actEl.dataset.id)}`, { method: 'DELETE' });
+      if (res.switchedDomain) {
+        toast(`已移除证书 ${res.deletedDomain || ''}，并自动切换默认证书为 ${res.switchedDomain}`);
+      } else {
+        toast(`证书 ${res.deletedDomain || ''} 已移除`);
+      }
       load('certificates');
     }
     else if (action === 'random-port') {
@@ -3059,9 +3136,19 @@ $('#sidebar-scrim')?.addEventListener('click', () => $('#app').classList.remove(
   }
 
   setInterval(() => {
-    const isSearching = document.activeElement && document.activeElement.matches && document.activeElement.matches('[data-search]');
-    if (state.session && !$('#modal')?.open && !isSearching && ['overview', 'inbounds', 'outbounds'].includes(state.page)) {
-      load(state.page);
+    const activeTag = document.activeElement?.tagName || '';
+    const isEditingField = ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeTag);
+    const recentlyScrolled = (Date.now() - Math.max(lastUserScrollAt, lastUserInteractAt)) < 3000;
+    const hasOpenInlineQr = Boolean(document.querySelector('#content .subscription-qr:not(.hidden)'));
+    if (
+      state.session &&
+      !$('#modal')?.open &&
+      !isEditingField &&
+      !recentlyScrolled &&
+      !hasOpenInlineQr &&
+      ['overview', 'inbounds', 'outbounds'].includes(state.page)
+    ) {
+      load(state.page, { silent: true });
     }
-  }, 4000);
+  }, 5000);
 })();
