@@ -1,6 +1,6 @@
 {
   "name": "nexusgate-singbox",
-  "version": "3.3.0",
+  "version": "3.4.0",
   "private": true,
   "description": "NexusGate · 枢门 轻量级全协议节点与中转分流管理面板",
   "type": "commonjs",

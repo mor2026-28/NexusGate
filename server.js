@@ -50,7 +50,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '3.3.0';
+const VERSION = '3.4.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -2148,11 +2148,12 @@ if (require.main === module) {
     store.flushIfDirty();
     if (typeof global.gc === 'function') {
       const m = process.memoryUsage();
-      if (m.rss > 48 * 1024 * 1024 || m.heapTotal > 20 * 1024 * 1024 || m.external > 3 * 1024 * 1024) {
+      const unusedHeap = m.heapTotal - m.heapUsed;
+      if (unusedHeap > 20 * 1024 * 1024 || m.external > 10 * 1024 * 1024) {
         try { global.gc(); } catch { /* ignore */ }
       }
     }
-  }, 30000).unref();
+  }, 60000).unref();
   setInterval(() => {
     try { cleanupSystemLogsAndMemory(singbox, store); } catch { /* ignore */ }
   }, 6 * 3600 * 1000).unref();

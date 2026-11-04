@@ -754,3 +754,89 @@ test('9. Zero-disruption cleanup & config diffing: memory cleanup never double-c
     await new Promise((r) => mockClash.close(r));
   }
 });
+
+test('10. High-Concurrency Stress Test: 40 Inbound Nodes + 35 Relay Outbounds + 400 Concurrent Connections Zero-Drop Benchmark', async () => {
+  // Ensure 35 relay outbounds exist and are bound across the 40+ inbound nodes
+  for (let i = 1; i <= 35; i += 1) {
+    const tag = `stress-relay-out-${i}`;
+    if (!store.state.outbounds.some((o) => o.tag === tag)) {
+      store.state.outbounds.push({
+        id: `out_stress_${i}`,
+        tag,
+        type: 'shadowsocks',
+        remark: `Relay-Landing-${i}`,
+        enabled: true,
+        server: `198.51.100.${i}`,
+        port: 20000 + i,
+        method: '2022-blake3-aes-128-gcm',
+        password: 'MTIzNDU2Nzg5MDEyMzQ1Ng==',
+        up: 0,
+        down: 0
+      });
+    }
+  }
+
+  const activeInbounds = store.state.inbounds.filter((i) => i.enable !== false);
+  assert.ok(activeInbounds.length >= 40, `Expected at least 40 active inbounds, got ${activeInbounds.length}`);
+
+  // Simulate 400 concurrent connections across 40 inbounds and 35 relay outbounds (10 connections per inbound)
+  const closedDuringStress = [];
+  const stressConns = [];
+  activeInbounds.slice(0, 40).forEach((inb, idx) => {
+    inb.limitIp = 0;
+    inb.limitDevice = 0;
+    const outTag = `stress-relay-out-${(idx % 35) + 1}`;
+    const userEmail = inb.clients?.[0]?.email || 'default';
+    for (let cIdx = 0; cIdx < 10; cIdx += 1) {
+      stressConns.push({
+        id: `stress-conn-${idx}-${cIdx}`,
+        start: new Date().toISOString(),
+        metadata: {
+          network: 'tcp',
+          type: `${inb.protocol}/${inb.tag}`,
+          user: userEmail,
+          sourceIP: `198.19.${idx}.${cIdx + 1}`,
+          sourcePort: String(30000 + cIdx)
+        },
+        upload: 16384 * (cIdx + 1),
+        download: 65536 * (cIdx + 1),
+        chains: [outTag]
+      });
+    }
+  });
+
+  const mockClash = http.createServer((reqM, resM) => {
+    if (reqM.method === 'GET' && reqM.url === '/connections') {
+      resM.writeHead(200, { 'content-type': 'application/json' });
+      resM.end(JSON.stringify({ connections: stressConns }));
+    } else if (reqM.method === 'DELETE' && reqM.url.startsWith('/connections/')) {
+      closedDuringStress.push(reqM.url);
+      resM.writeHead(204);
+      resM.end();
+    }
+  });
+  await new Promise((r) => mockClash.listen(0, '127.0.0.1', r));
+  store.state.settings.clashApiPort = mockClash.address().port;
+
+  try {
+    const t0 = Date.now();
+    for (let round = 1; round <= 5; round += 1) {
+      for (const c of stressConns) {
+        c.upload += 4096;
+        c.download += 8192;
+      }
+      await singbox.pollConnectionsAndEnforceLimits(new Date(t0 + round * 1000));
+    }
+    const elapsedMs = Date.now() - t0;
+    assert.equal(closedDuringStress.length, 0, 'Zero normal client connections may be dropped under 40-node / 400-conn load');
+    assert.ok(elapsedMs < 400, `5 full polling cycles of 400 connections should complete in <400ms (took ${elapsedMs}ms)`);
+
+    // Verify overview status endpoint reports low private panel memory (RssAnon)
+    const ovRes = await req('/SecPath16Chars99/api/overview');
+    assert.equal(ovRes.status, 200);
+    const panelMemMB = Math.round(ovRes.json.system.panelMemoryBytes / (1024 * 1024));
+    assert.ok(panelMemMB < 45, `Panel private memory (${panelMemMB} MB) should stay well under 45 MB even with 40+ nodes and 400 connections`);
+  } finally {
+    await new Promise((r) => mockClash.close(r));
+  }
+});
