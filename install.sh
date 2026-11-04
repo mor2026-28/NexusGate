@@ -254,7 +254,7 @@ PY
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate · 枢门 v3.4 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate · 枢门 v3.5 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
   echo -e " 访问地址   : ${cyan}${login_url}${plain}"
   echo -e " 登录账号   : ${green}${admin_user}${plain}"

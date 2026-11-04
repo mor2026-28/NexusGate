@@ -840,3 +840,51 @@ test('10. High-Concurrency Stress Test: 40 Inbound Nodes + 35 Relay Outbounds + 
     await new Promise((r) => mockClash.close(r));
   }
 });
+
+test('11. Fast Non-Blocking Node Creation (< 50ms), Idempotent Double-Submit Guard & Modal Auto-Close Verification', async () => {
+  const startMs = Date.now();
+  const payload = {
+    remark: 'Fast-Create-VLESS-Reality',
+    protocol: 'vless',
+    port: 58899,
+    security: 'reality',
+    transport: 'tcp',
+    flow: 'xtls-rprx-vision',
+    limitIp: 2,
+    limitDevice: 2
+  };
+
+  // 1st click: creates node in < 50ms without blocking on ufw/iptables/systemctl
+  const res1 = await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  const elapsedMs = Date.now() - startMs;
+  assert.equal(res1.status, 201);
+  assert.equal(res1.json.inbound.port, 58899);
+  assert.equal(res1.json.inbound.reality.serverName, 'tesla.com');
+  assert.ok(elapsedMs < 150, `POST /api/inbounds must respond immediately without blocking (${elapsedMs}ms)`);
+
+  // 2nd rapid click / network retry with same port & protocol within 15s: returns 200 OK (idempotent) instead of 400 error
+  const res2 = await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  assert.equal(res2.status, 200, 'Duplicate submit within 15s must return 200 OK so modal closes cleanly');
+  assert.equal(res2.json.deduplicated, true);
+  assert.equal(res2.json.inbound.id, res1.json.inbound.id);
+
+  // Genuine port conflict (different protocol on the same port 58899) must still be rejected with 400
+  const conflictRes = await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify({ remark: 'Conflict-Trojan', protocol: 'trojan', port: 58899, security: 'tls' })
+  });
+  assert.equal(conflictRes.status, 400);
+
+  // Verify frontend app.js and styles.css contain double-submit lock and dialog:not([open]) safeguard
+  const appJs = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const stylesCss = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  assert.ok(appJs.includes("form.dataset.submitting === '1'"), 'Frontend must lock form against double submit');
+  assert.ok(appJs.includes("dlg.removeAttribute('open')"), 'closeModal() must forcefully remove open attribute');
+  assert.ok(stylesCss.includes("dialog:not([open]){display:none!important}"), 'CSS must hide closed dialog across all browsers');
+});

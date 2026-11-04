@@ -50,7 +50,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '3.4.0';
+const VERSION = '3.5.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -780,16 +780,43 @@ function enrichInboundWithLinks(inbound, reqHost = '') {
   };
 }
 
-function autoApplyIfEnabled() {
-  if (store.state.settings.autoApplyConfig !== false) {
-    try {
-      singbox.reloadIfChanged();
-    } catch {
-      singbox.writeConfig();
-    }
-  } else {
-    singbox.writeConfig();
+let _bgApplyQueued = false;
+const _bgPendingPorts = new Set();
+
+function autoApplyIfEnabled(portsToOpen = []) {
+  // 1. Always write config.json synchronously (< 2ms) so disk state is immediately consistent
+  let writeResult = { changed: false };
+  try {
+    writeResult = singbox.writeConfig();
+  } catch { /* ignore */ }
+
+  for (const p of portsToOpen) {
+    const n = Number(p);
+    if (Number.isInteger(n) && n > 0 && n <= 65535) _bgPendingPorts.add(n);
   }
+
+  // 2. Run slow OS child processes (ufw/iptables/systemctl) asynchronously on next tick
+  //    so HTTP responses return in < 10ms and modals close instantaneously!
+  if (_bgApplyQueued) return;
+  _bgApplyQueued = true;
+  const hadConfigChange = Boolean(writeResult.changed);
+  setImmediate(() => {
+    _bgApplyQueued = false;
+    if (_bgPendingPorts.size > 0) {
+      const ports = [..._bgPendingPorts];
+      _bgPendingPorts.clear();
+      try { openFirewallPorts(ports); } catch { /* ignore */ }
+    }
+    if (store.state.settings.autoApplyConfig !== false) {
+      try {
+        if (fs.existsSync(singbox.getBinPath())) {
+          if (hadConfigChange || singbox.getStatus().state !== 'running') {
+            singbox.restart();
+          }
+        }
+      } catch { /* ignore */ }
+    }
+  });
 }
 
 async function handleRequest(req, res) {
@@ -1071,6 +1098,19 @@ async function handleRequest(req, res) {
       const inbound = normalizeInboundPayload(body);
       const portConflict = store.state.inbounds.find((x) => Number(x.port) === Number(inbound.port));
       if (portConflict) {
+        // Idempotent guard: if an identical node (same port & protocol) was just created within the last 15 seconds
+        // (e.g. from a user double-click or network retry), return 200 OK with the created node so the modal closes cleanly!
+        const createdMs = Date.parse(portConflict.createdAt || '') || 0;
+        if (
+          portConflict.protocol === inbound.protocol &&
+          (Date.now() - createdMs) >= 0 &&
+          (Date.now() - createdMs) < 15000
+        ) {
+          return sendJson(res, 200, {
+            inbound: enrichInboundWithLinks(portConflict, reqHostHeader),
+            deduplicated: true
+          });
+        }
         return sendError(res, 400, `端口 ${inbound.port} 已被入站 [${portConflict.remark}] 占用`);
       }
       store.transact((st) => {
@@ -1078,8 +1118,7 @@ async function handleRequest(req, res) {
         syncInboundRelayToRoutingRule(st, inbound);
         store.addAudit(session.username, 'create_inbound', `${inbound.remark} (${inbound.protocol}:${inbound.port})`);
       });
-      openFirewallPorts([inbound.port]);
-      autoApplyIfEnabled();
+      autoApplyIfEnabled([inbound.port]);
       return sendJson(res, 201, { inbound: enrichInboundWithLinks(inbound, reqHostHeader) });
     }
 
@@ -1099,9 +1138,8 @@ async function handleRequest(req, res) {
         syncInboundRelayToRoutingRule(st, updated);
         store.addAudit(session.username, 'update_inbound', `${updated.remark} (${updated.protocol}:${updated.port})`);
       });
-      openFirewallPorts([updated.port]);
-      autoApplyIfEnabled();
-      await singbox.pollConnectionsAndEnforceLimits().catch(() => {});
+      autoApplyIfEnabled([updated.port]);
+      setImmediate(() => { singbox.pollConnectionsAndEnforceLimits().catch(() => {}); });
       return sendJson(res, 200, { inbound: enrichInboundWithLinks(updated, reqHostHeader) });
     }
 
@@ -1246,7 +1284,7 @@ async function handleRequest(req, res) {
         store.addAudit(session.username, 'update_inbound_client', `${existing.remark} -> ${client.email}`);
       });
       autoApplyIfEnabled();
-      await singbox.pollConnectionsAndEnforceLimits().catch(() => {});
+      setImmediate(() => { singbox.pollConnectionsAndEnforceLimits().catch(() => {}); });
       return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing, reqHostHeader), client });
     }
 

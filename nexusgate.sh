@@ -545,7 +545,7 @@ EOF
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
-  ok "NexusGate 面板与管理脚本已更新至 v3.4，所有节点与 Sing-box 内核已重新加载生效！"
+  ok "NexusGate 面板与管理脚本已更新至 v3.5，所有节点与 Sing-box 内核已重新加载生效！"
   show_info
   if [[ -r /dev/tty ]]; then
     pause_return
@@ -570,7 +570,7 @@ show_menu() {
   clear 2>/dev/null || true
   echo -e "
   ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
-  ${cyan}║${plain}     ${green}         NexusGate · 枢门 面板管理脚本 (v3.4)         ${plain}      ${cyan}║${plain}
+  ${cyan}║${plain}     ${green}         NexusGate · 枢门 面板管理脚本 (v3.5)         ${plain}      ${cyan}║${plain}
   ${cyan}║${plain}     ${yellow}全协议节点编排 · BBR+FQ+HY2 加速 · ACME 证书联动${plain}          ${cyan}║${plain}
   ${cyan}╚════════════════════════════════════════════════════════════════╝${plain}
   ${green}0.${plain} 退出脚本

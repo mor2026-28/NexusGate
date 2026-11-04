@@ -172,12 +172,22 @@ function openModal(kicker, title, html) {
   $('#modal-title').textContent = title;
   $('#modal-body').innerHTML = html;
   const dlg = $('#modal');
-  if (!dlg.open) dlg.showModal();
+  if (!dlg) return;
+  try {
+    if (!dlg.open) dlg.showModal();
+  } catch {
+    dlg.setAttribute('open', '');
+  }
 }
 
 function closeModal() {
   const dlg = $('#modal');
-  if (dlg.open) dlg.close();
+  if (!dlg) return;
+  try {
+    if (dlg.open && typeof dlg.close === 'function') dlg.close();
+  } catch { /* ignore */ }
+  dlg.removeAttribute('open');
+  if ($('#modal-body')) $('#modal-body').innerHTML = '';
 }
 
 function showLogin() {
@@ -1547,7 +1557,7 @@ async function openInboundModal(existing = null, preset = '') {
   const portRand = Math.floor(Math.random() * 40000) + 15000;
 
   const item = existing ? JSON.parse(JSON.stringify(existing)) : {
-    remark: '',
+    remark: `VLESS-Reality-${portRand}`,
     tag: `inbound-${portRand}`,
     protocol: 'vless',
     listen: '::',
@@ -1715,6 +1725,26 @@ async function openInboundModal(existing = null, preset = '') {
     const proto = $('#inb-proto-select').value;
     const box = $('#inb-dynamic-fields');
     if (!box) return;
+    if (!existing) {
+      const remInput = $('#inbound-form input[name="remark"]');
+      const curPort = $('#inb-port-input')?.value || item.port;
+      if (remInput && (!remInput.value.trim() || /^(VLESS-Reality|VLESS|VMess|Trojan|AnyTLS|HY2|Hysteria2|SS2022-128|SS2022-256|SS-128|Shadowsocks|SOCKS5|TUIC|HTTP|Mixed|端口转发)-\d+$/i.test(remInput.value.trim()))) {
+        const protoLabelMap = {
+          vless: 'VLESS-Reality',
+          anytls: 'AnyTLS',
+          hysteria2: 'HY2',
+          shadowsocks: 'SS2022-128',
+          socks: 'SOCKS5',
+          trojan: 'Trojan',
+          vmess: 'VMess',
+          tuic: 'TUIC',
+          http: 'HTTP',
+          mixed: 'Mixed',
+          direct: '端口转发'
+        };
+        remInput.value = `${protoLabelMap[proto] || proto.toUpperCase()}-${curPort}`;
+      }
+    }
 
     if (proto === 'direct') {
       box.innerHTML = `
@@ -2790,7 +2820,14 @@ document.addEventListener('click', async (e) => {
     }
     else if (action === 'inb-rand-port') {
       const input = $('#inb-port-input');
-      if (input) input.value = Math.floor(Math.random() * 40000) + 15000;
+      if (input) {
+        const nextP = Math.floor(Math.random() * 40000) + 15000;
+        input.value = nextP;
+        const remInput = $('#inbound-form input[name="remark"]');
+        if (remInput && /-\d+$/.test(remInput.value.trim())) {
+          remInput.value = remInput.value.trim().replace(/-\d+$/, `-${nextP}`);
+        }
+      }
     }
     else if (action === 'gen-uuid') {
       const input = $('#inb-uuid-input');
@@ -3203,8 +3240,17 @@ document.addEventListener('input', (e) => {
 document.addEventListener('submit', async (e) => {
   const form = e.target;
   e.preventDefault();
+  if (form.dataset.submitting === '1') return;
+  form.dataset.submitting = '1';
+
   const fd = new FormData(form);
   const data = Object.fromEntries(fd.entries());
+  const submitBtn = form.querySelector('button[type="submit"]');
+  const origBtnText = submitBtn ? submitBtn.textContent : '';
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    if (form.id !== 'login-form') submitBtn.textContent = '⏳ 正在保存并生效...';
+  }
 
   try {
     if (form.id === 'login-form') {
@@ -3258,15 +3304,22 @@ document.addEventListener('submit', async (e) => {
           shortIds: data.realityShortIds
         };
       }
-      if (id) {
-        await api(`/api/inbounds/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
-        toast('入站节点已更新并重载配置');
-      } else {
-        await api('/api/inbounds', { method: 'POST', body: JSON.stringify(payload) });
-        toast('入站节点已创建并生效');
-      }
+      const res = id
+        ? await api(`/api/inbounds/${id}`, { method: 'PUT', body: JSON.stringify(payload) })
+        : await api('/api/inbounds', { method: 'POST', body: JSON.stringify(payload) });
       closeModal();
-      load('inbounds');
+      if (res && res.inbound) {
+        const idx = state.inbounds.findIndex((x) => x.id === res.inbound.id);
+        if (idx >= 0) state.inbounds[idx] = res.inbound;
+        else state.inbounds.unshift(res.inbound);
+      }
+      toast(id ? '入站节点已更新并重载配置' : '入站节点已创建并生效');
+      if (state.page !== 'inbounds') {
+        setPage('inbounds');
+      } else {
+        render();
+        load('inbounds', { silent: true });
+      }
     }
     else if (form.id === 'client-form') {
       const inboundId = form.dataset.inboundId;
@@ -3282,22 +3335,24 @@ document.addEventListener('submit', async (e) => {
         expiryTime: Number.isFinite(expiryMs) && expiryMs > 0 ? expiryMs : 0,
         enable: form.querySelector('[name="enable"]')?.checked !== false
       };
-      if (clientId) {
-        await api(`/api/inbounds/${inboundId}/clients/${encodeURIComponent(clientId)}`, {
-          method: 'PUT',
-          body: JSON.stringify(payload)
-        });
-        toast('用户配置已更新并生效');
-      } else {
-        await api(`/api/inbounds/${inboundId}/clients`, {
-          method: 'POST',
-          body: JSON.stringify(payload)
-        });
-        state.expandedInbounds.add(inboundId);
-        toast('新用户已添加至该节点并生效');
-      }
+      const res = clientId
+        ? await api(`/api/inbounds/${inboundId}/clients/${encodeURIComponent(clientId)}`, {
+            method: 'PUT',
+            body: JSON.stringify(payload)
+          })
+        : await api(`/api/inbounds/${inboundId}/clients`, {
+            method: 'POST',
+            body: JSON.stringify(payload)
+          });
+      if (!clientId) state.expandedInbounds.add(inboundId);
       closeModal();
-      load('inbounds');
+      if (res && res.inbound) {
+        const idx = state.inbounds.findIndex((x) => x.id === res.inbound.id);
+        if (idx >= 0) state.inbounds[idx] = res.inbound;
+      }
+      toast(clientId ? '用户配置已更新并生效' : '新用户已添加至该节点并生效');
+      render();
+      load('inbounds', { silent: true });
     }
     else if (form.id === 'outbound-form') {
       const id = form.dataset.id;
@@ -3309,20 +3364,23 @@ document.addEventListener('submit', async (e) => {
       if (isJsonTabActive && $('#out-json-textarea')?.value.trim()) {
         payload.rawJson = $('#out-json-textarea').value.trim();
       }
-      if (id) {
-        await api(`/api/outbounds/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
-        toast('出站规则已更新');
-      } else {
-        await api('/api/outbounds', { method: 'POST', body: JSON.stringify(payload) });
-        toast('出站规则已添加');
-      }
+      const res = id
+        ? await api(`/api/outbounds/${id}`, { method: 'PUT', body: JSON.stringify(payload) })
+        : await api('/api/outbounds', { method: 'POST', body: JSON.stringify(payload) });
       closeModal();
-      load('outbounds');
+      if (res && res.outbound) {
+        const idx = state.outbounds.findIndex((x) => x.id === res.outbound.id);
+        if (idx >= 0) state.outbounds[idx] = res.outbound;
+        else state.outbounds.push(res.outbound);
+      }
+      toast(id ? '出站规则已更新' : '出站规则已添加');
+      render();
+      load('outbounds', { silent: true });
     }
     else if (form.id === 'import-uri-form') {
       const res = await api('/api/outbounds/import-uri', { method: 'POST', body: JSON.stringify(data) });
-      toast(`已成功解析并导入 ${res.count || 1} 个出站节点`);
       closeModal();
+      toast(`已成功解析并导入 ${res.count || 1} 个出站节点`);
       load('outbounds');
     }
     else if (form.id === 'rule-form') {
@@ -3333,12 +3391,11 @@ document.addEventListener('submit', async (e) => {
       };
       if (id) {
         await api(`/api/routing/rules/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
-        toast('路由规则已更新');
       } else {
         await api('/api/routing/rules', { method: 'POST', body: JSON.stringify(payload) });
-        toast('路由规则已添加');
       }
       closeModal();
+      toast(id ? '路由规则已更新' : '路由规则已添加');
       load('routing');
     }
     else if (form.id === 'cert-selfsigned-form') {
@@ -3349,21 +3406,21 @@ document.addEventListener('submit', async (e) => {
           applyToPanel: form.querySelector('[name="applyToPanel"]')?.checked || false
         })
       });
-      toast('10 年自签 SSL 证书已生成并自动绑定！');
       closeModal();
+      toast('10 年自签 SSL 证书已生成并自动绑定！');
       load('certificates');
     }
     else if (form.id === 'cert-acme-form') {
       toast('正在调用 ACME 申请证书，请稍候...');
       await api('/api/certificates/acme', { method: 'POST', body: JSON.stringify(data) });
-      toast('ACME 证书签发成功并已同步绑定至面板与全部节点！');
       closeModal();
+      toast('ACME 证书签发成功并已同步绑定至面板与全部节点！');
       load('certificates');
     }
     else if (form.id === 'cert-custom-form') {
       await api('/api/certificates/custom', { method: 'POST', body: JSON.stringify(data) });
-      toast('自定义证书已保存并绑定！');
       closeModal();
+      toast('自定义证书已保存并绑定！');
       load('certificates');
     }
     else if (form.id === 'settings-form') {
@@ -3387,13 +3444,19 @@ document.addEventListener('submit', async (e) => {
     }
     else if (form.id === 'restore-backup-form') {
       await api('/api/restore', { method: 'POST', body: JSON.stringify({ backup: JSON.parse(data.backupJson) }) });
-      toast('面板备份已恢复！');
       closeModal();
+      toast('面板备份已恢复！');
       load('settings');
     }
   } catch (err) {
     if (form.id === 'login-form') $('#login-error').textContent = err.message;
     else toast(err.message, true);
+  } finally {
+    delete form.dataset.submitting;
+    if (submitBtn && submitBtn.isConnected) {
+      submitBtn.disabled = false;
+      if (origBtnText) submitBtn.textContent = origBtnText;
+    }
   }
 });
 
