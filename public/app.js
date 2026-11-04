@@ -1568,8 +1568,8 @@ async function openInboundModal(existing = null, preset = '') {
     certPath: defCertFile,
     keyPath: defKeyFile,
     reality: {
-      serverName: 'www.apple.com',
-      target: 'www.apple.com:443',
+      serverName: 'tesla.com',
+      target: 'www.tesla.com:443',
       privateKey: '',
       publicKey: '',
       shortIds: ['1a2b3c4d'],
@@ -1579,8 +1579,8 @@ async function openInboundModal(existing = null, preset = '') {
   };
 
   if (item.reality && ['www.cloudflare.com', 'cloudflare.com', 'www.bing.com'].includes(String(item.reality.serverName || '').toLowerCase())) {
-    item.reality.serverName = 'www.apple.com';
-    item.reality.target = 'www.apple.com:443';
+    item.reality.serverName = 'tesla.com';
+    item.reality.target = 'www.tesla.com:443';
   }
 
   if (preset) {
@@ -1942,21 +1942,21 @@ async function openInboundModal(existing = null, preset = '') {
         if (curSec === 'reality') {
           const r = item.reality || {};
           secBox.innerHTML = `
-            <div class="section-title">Reality 伪装与 X25519 密钥对 (默认 Apple 高可用伪装)</div>
+            <div class="section-title">Reality 伪装与 X25519 密钥对 (默认 Tesla 高可用伪装)</div>
             <label>
               伪装目标预设 (SNI)
               <select id="inb-reality-preset">
                 <option value="">— 选择高可用 SNI 预设 —</option>
-                ${state.catalog.realityPresets.map((p) => `<option value="${esc(p.serverName)}" data-target="${esc(p.target)}"${selected(p.serverName, r.serverName || 'www.apple.com')}>${esc(p.label)}</option>`).join('')}
+                ${state.catalog.realityPresets.map((p) => `<option value="${esc(p.serverName)}" data-target="${esc(p.target)}"${selected(p.serverName, r.serverName || 'tesla.com')}>${esc(p.label)}</option>`).join('')}
               </select>
             </label>
             <label>
               伪装域名 (ServerName / SNI)
-              <input name="realityServerName" id="inb-reality-sni" value="${esc(r.serverName || 'www.apple.com')}" required>
+              <input name="realityServerName" id="inb-reality-sni" value="${esc(r.serverName || 'tesla.com')}" required>
             </label>
             <label>
               握手目标地址 (Handshake Target)
-              <input name="realityTarget" id="inb-reality-target" value="${esc(r.target || 'www.apple.com:443')}" required>
+              <input name="realityTarget" id="inb-reality-target" value="${esc(r.target || 'www.tesla.com:443')}" required>
             </label>
             <label>
               ShortIds (十六进制，逗号分隔)

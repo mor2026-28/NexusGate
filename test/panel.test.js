@@ -113,8 +113,8 @@ test('2. Reality SNI excludes Cloudflare/Microsoft, SS-2022 enforces exact-lengt
     }
 
     if (p === 'vless-reality') {
-      assert.equal(inb.reality.serverName, 'www.apple.com', 'Cloudflare SNI should automatically normalize to www.apple.com');
-      assert.equal(inb.reality.target, 'www.apple.com:443');
+      assert.equal(inb.reality.serverName, 'tesla.com', 'Forbidden SNI should automatically normalize to tesla.com');
+      assert.equal(inb.reality.target, 'www.tesla.com:443');
     }
 
     for (const link of inb.links) {
@@ -133,7 +133,7 @@ test('2. Reality SNI excludes Cloudflare/Microsoft, SS-2022 enforces exact-lengt
   assert.ok(realityInb, 'Reality inbound should exist in Sing-box config');
   assert.equal(realityInb.tls.certificate_path, undefined, 'Reality inbound MUST NEVER have certificate_path');
   assert.equal(realityInb.tls.key_path, undefined, 'Reality inbound MUST NEVER have key_path');
-  assert.equal(realityInb.tls.server_name, 'www.apple.com');
+  assert.equal(realityInb.tls.server_name, 'tesla.com');
 
   const anytlsInb = config.inbounds.find((i) => i.type === 'anytls');
   assert.ok(anytlsInb, 'AnyTLS inbound should exist');

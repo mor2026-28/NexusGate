@@ -50,7 +50,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '3.2.0';
+const VERSION = '3.3.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -548,13 +548,14 @@ function normalizeInboundPayload(body, existing = null) {
     } else if (!pub) {
       pub = deriveRealityPublicKey(priv);
     }
-    let serverName = String(rIn.serverName || 'www.apple.com').trim();
-    if (['www.cloudflare.com', 'cloudflare.com', 'www.bing.com'].includes(serverName.toLowerCase())) {
-      serverName = 'www.apple.com';
+    let serverName = String(rIn.serverName || 'tesla.com').trim();
+    if (['www.cloudflare.com', 'cloudflare.com', 'www.bing.com', 'bing.com', 'www.yahoo.com', 'yahoo.com', 'dl.google.com'].includes(serverName.toLowerCase())) {
+      serverName = 'tesla.com';
     }
-    let target = String(rIn.target || `${serverName}:443`).trim();
-    if (/cloudflare\.com|bing\.com/i.test(target)) {
-      target = `${serverName}:443`;
+    const defTarget = serverName === 'tesla.com' ? 'www.tesla.com:443' : `${serverName}:443`;
+    let target = String(rIn.target || defTarget).trim();
+    if (/cloudflare\.com|bing\.com|yahoo\.com|dl\.google\.com/i.test(target)) {
+      target = defTarget;
     }
     const shortIds = Array.isArray(rIn.shortIds)
       ? rIn.shortIds
@@ -2145,10 +2146,13 @@ if (require.main === module) {
     }
     if (loginAttempts.size > 2000) loginAttempts.clear();
     store.flushIfDirty();
-    if (typeof global.gc === 'function' && process.memoryUsage().heapUsed > 65 * 1024 * 1024) {
-      try { global.gc(); } catch { /* ignore */ }
+    if (typeof global.gc === 'function') {
+      const m = process.memoryUsage();
+      if (m.rss > 48 * 1024 * 1024 || m.heapTotal > 20 * 1024 * 1024 || m.external > 3 * 1024 * 1024) {
+        try { global.gc(); } catch { /* ignore */ }
+      }
     }
-  }, 60000).unref();
+  }, 30000).unref();
   setInterval(() => {
     try { cleanupSystemLogsAndMemory(singbox, store); } catch { /* ignore */ }
   }, 6 * 3600 * 1000).unref();

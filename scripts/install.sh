@@ -244,7 +244,7 @@ PY
     systemctl restart nexusgate-singbox.service || true
   else
     pkill -f "node.*$INSTALL_DIR/server.js" 2>/dev/null || true
-    nohup env NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node --expose-gc --max-old-space-size=192 "$INSTALL_DIR/server.js" >/var/log/nexusgate.log 2>&1 &
+    nohup env NG_DATA_FILE="${DATA_DIR}/nexusgate.json" MALLOC_ARENA_MAX=2 node --expose-gc --max-semi-space-size=2 --max-old-space-size=192 "$INSTALL_DIR/server.js" >/var/log/nexusgate.log 2>&1 &
   fi
 
   local info_json login_url cert_domain
@@ -254,7 +254,7 @@ PY
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate · 枢门 v3.2 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate · 枢门 v3.3 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
   echo -e " 访问地址   : ${cyan}${login_url}${plain}"
   echo -e " 登录账号   : ${green}${admin_user}${plain}"
