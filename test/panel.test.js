@@ -888,3 +888,84 @@ test('11. Fast Non-Blocking Node Creation (< 50ms), Idempotent Double-Submit Gua
   assert.ok(appJs.includes("dlg.removeAttribute('open')"), 'closeModal() must forcefully remove open attribute');
   assert.ok(stylesCss.includes("dialog:not([open]){display:none!important}"), 'CSS must hide closed dialog across all browsers');
 });
+
+test('12. High-Strength Unique Initial Server Credentials (--init-panel & Store) and Non-Colliding Node/Client Credentials', async () => {
+  const { generateStrongCredential, verifySecret, hashSecret } = require('../lib/auth');
+  const { Store } = require('../lib/store');
+
+  // 1) Verify generateStrongCredential guarantees uppercase, lowercase, digits, and non-collision across 50 runs
+  const seen = new Set();
+  for (let i = 0; i < 50; i += 1) {
+    const u = generateStrongCredential(13, { prefix: 'ng_' });
+    const p = generateStrongCredential(18, { exclude: u });
+    assert.equal(u.length, 13);
+    assert.equal(p.length, 18);
+    assert.notEqual(u, p, 'Username and password must never be identical');
+    assert.ok(/[A-Z]/.test(p) && /[a-z]/.test(p) && /[0-9]/.test(p), `Password must contain upper, lower, and digits: ${p}`);
+    assert.ok(!seen.has(u) && !seen.has(p), 'Every generated credential must be unique');
+    seen.add(u);
+    seen.add(p);
+  }
+
+  // 2) Simulate 2 brand-new server installations via --init-panel and verify completely distinct high-strength credentials
+  const srvDir1 = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-srv1-'));
+  const srvDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-srv2-'));
+  try {
+    const cleanEnv1 = { ...process.env, NG_DATA_FILE: path.join(srvDir1, 'nexusgate.json'), NG_SINGBOX_CONFIG: path.join(srvDir1, 'sb.json') };
+    delete cleanEnv1.NG_ADMIN_USERNAME;
+    delete cleanEnv1.NG_ADMIN_PASSWORD;
+    delete cleanEnv1.NG_PORT;
+    delete cleanEnv1.NG_BASE_PATH;
+
+    const cleanEnv2 = { ...cleanEnv1, NG_DATA_FILE: path.join(srvDir2, 'nexusgate.json'), NG_SINGBOX_CONFIG: path.join(srvDir2, 'sb.json') };
+
+    const out1 = spawnSync(process.execPath, [path.join(__dirname, '..', 'server.js'), '--init-panel', 'auto', 'auto', 'auto', 'auto', '203.0.113.10'], { env: cleanEnv1, encoding: 'utf8' });
+    assert.equal(out1.status, 0, `srv1 init failed: ${out1.stderr}`);
+    const info1 = JSON.parse(out1.stdout.trim());
+
+    // Also test passing identical username & password to --init-panel: it must automatically remediate so password !== username
+    const out2 = spawnSync(process.execPath, [path.join(__dirname, '..', 'server.js'), '--init-panel', 'auto', 'same_cred_test', 'same_cred_test', 'auto', '203.0.113.11'], { env: cleanEnv2, encoding: 'utf8' });
+    assert.equal(out2.status, 0, `srv2 init failed: ${out2.stderr}`);
+    const info2 = JSON.parse(out2.stdout.trim());
+
+    assert.ok(info1.username.startsWith('ng_') && info1.username.length === 13);
+    assert.equal(info1.password.length, 18);
+    assert.notEqual(info1.username, info1.password);
+    assert.notEqual(info1.username, info2.username, 'Different servers must get different usernames');
+    assert.notEqual(info1.password, info2.password, 'Different servers must get different passwords');
+    assert.notEqual(info2.username, info2.password, 'Even if identical user/pass passed to --init-panel, password must be auto-remediated to a distinct 18-char strong password');
+    assert.equal(info2.password.length, 18);
+  } finally {
+    fs.rmSync(srvDir1, { recursive: true, force: true });
+    fs.rmSync(srvDir2, { recursive: true, force: true });
+  }
+
+  // 3) Verify creating SOCKS5 and AnyTLS nodes and adding clients always produces distinct username, email, and password
+  const socksCreate = await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify({
+      remark: 'SOCKS-Unique-Creds',
+      protocol: 'socks',
+      port: 58901,
+      socksUser: 'same_socks_cred',
+      socksPassword: 'same_socks_cred'
+    })
+  });
+  assert.equal(socksCreate.status, 201);
+  const socksNode = socksCreate.json.inbound;
+  assert.equal(socksNode.socksUser, 'same_socks_cred');
+  assert.notEqual(socksNode.socksPassword, socksNode.socksUser, 'SOCKS password must never equal SOCKS username');
+  assert.equal(socksNode.socksPassword.length, 18);
+  assert.notEqual(socksNode.clients[0].username, socksNode.clients[0].password);
+
+  // Add a second client to SOCKS node without specifying credentials
+  const addSocksClient = await req(`/SecPath16Chars99/api/inbounds/${socksNode.id}/clients`, {
+    method: 'POST',
+    body: JSON.stringify({})
+  });
+  assert.equal(addSocksClient.status, 201);
+  const sc = addSocksClient.json.client;
+  assert.notEqual(sc.username, sc.password, 'Added client username and password must be distinct');
+  assert.notEqual(sc.email, sc.password, 'Added client email and password must be distinct');
+  assert.ok(sc.password.length >= 18);
+});

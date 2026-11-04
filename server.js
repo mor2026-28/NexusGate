@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { Store, defaultState } = require('./lib/store');
-const { hashSecret, verifySecret, randomString, SessionManager } = require('./lib/auth');
+const { hashSecret, verifySecret, randomString, generateStrongCredential, SessionManager } = require('./lib/auth');
 const {
   sendJson,
   sendError,
@@ -50,7 +50,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '3.5.0';
+const VERSION = '3.6.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -303,9 +303,12 @@ function getPanelInfoSummary() {
   const cleanUrl = `${proto}://${host}:${s.webPort}${base === '/' ? '/' : `${base}/`}`;
   const subPath = (s.subPath || '/sub/').replace(/\/+$/, '');
   const subUrl = `${proto}://${host}:${s.webPort}${subPath}/${s.subToken || ''}`;
+  const initPass = store.state.admin.initialPassword || '';
+  const validInitPass = (initPass && verifySecret(initPass, store.state.admin.passwordHash)) ? initPass : '';
   return {
     version: VERSION,
     username: store.state.admin.username,
+    initialPassword: validInitPass,
     listen: s.webListen,
     port: s.webPort,
     basePath: base === '/' ? '/' : `${base}/`,
@@ -335,7 +338,7 @@ function printPrettyPanelInfo() {
   console.log(`  SSL 状态   : ${info.https ? `${g}已开启 (${info.defaultNodeTlsDomain})${r}` : `${y}未开启 (HTTP)${r}`}`);
   console.log(`  节点统计   : 入站 ${c}${info.inboundsCount}${r} 个 | 出站 ${c}${info.outboundsCount}${r} 个 | 转发规则 ${c}${info.rulesCount}${r} 条`);
   console.log(`────────────────────────────────────────────────────────────────`);
-  console.log(`  ${y}提示: 如需重置账号密码，请在菜单中输入 6${r}`);
+  console.log(`  ${y}提示: 如需重置或更换账号密码，请在菜单中输入 6${r}`);
 }
 
 function handleCliCommand(args) {
@@ -357,16 +360,75 @@ function handleCliCommand(args) {
     console.log(`已完成日志清理与内存释放: ${res.actions.join(', ')}`);
     return;
   }
-  if (cmd === '--set-account') {
-    const username = String(args[1] || '').trim();
-    const password = String(args[2] || '').trim();
-    if (!username || !password) {
-      console.error('用法: node server.js --set-account <username> <password>');
+  if (cmd === '--init-panel') {
+    const rawPort = String(args[1] || '').trim();
+    const rawUser = String(args[2] || '').trim();
+    const rawPass = String(args[3] || '').trim();
+    const rawPath = String(args[4] || '').trim();
+    const rawIp = String(args[5] || '').trim();
+
+    const portNum = Number(rawPort);
+    const finalPort = (Number.isInteger(portNum) && portNum >= 1 && portNum <= 65535)
+      ? portNum
+      : crypto.randomInt(15000, 60001);
+    const finalUser = (!rawUser || rawUser === 'auto' || rawUser === '--random' || rawUser === 'admin')
+      ? generateStrongCredential(13, { prefix: 'ng_' })
+      : rawUser;
+    const finalPass = (!rawPass || rawPass === 'auto' || rawPass === '--random' || rawPass === 'admin123456' || rawPass === finalUser)
+      ? generateStrongCredential(18, { exclude: finalUser })
+      : rawPass;
+    const finalPath = (!rawPath || rawPath === 'auto' || rawPath === '--random' || rawPath === '/')
+      ? normalizeBasePath(`/${generateStrongCredential(16)}/`)
+      : normalizeBasePath(rawPath);
+
+    const realCert = getActiveRealCert(store.state);
+    const certToBind = realCert || issueSelfSignedCert({
+      domain: store.state.settings.webDomain || 'www.apple.com',
+      ip: rawIp || store.state.settings.publicIPv4 || '',
+      days: 3650
+    });
+
+    store.transact((st) => {
+      st.admin.username = finalUser;
+      st.admin.passwordHash = hashSecret(finalPass);
+      st.admin.initialPassword = finalPass;
+      st.admin.updatedAt = new Date().toISOString();
+      st.settings.webPort = finalPort;
+      st.settings.webBasePath = finalPath;
+      st.settings.strictBasePath = true;
+      if (rawIp) st.settings.publicIPv4 = rawIp;
+      bindCertificateEverywhere(st, certToBind, true, true, !realCert);
+    });
+    singbox.writeConfig();
+
+    if (!verifySecret(finalPass, store.state.admin.passwordHash)) {
+      console.error('初始化密码校验失败');
       process.exit(1);
     }
+
+    const summary = getPanelInfoSummary();
+    console.log(JSON.stringify({
+      ...summary,
+      username: finalUser,
+      password: finalPass,
+      port: finalPort,
+      basePath: summary.basePath
+    }));
+    return;
+  }
+  if (cmd === '--set-account') {
+    const rawUser = String(args[1] || '').trim();
+    const rawPass = String(args[2] || '').trim();
+    const username = (!rawUser || rawUser === '--random' || rawUser === 'auto')
+      ? generateStrongCredential(13, { prefix: 'ng_' })
+      : rawUser;
+    const password = (!rawPass || rawPass === '--random' || rawPass === 'auto' || rawPass === username)
+      ? generateStrongCredential(18, { exclude: username })
+      : rawPass;
     store.transact((st) => {
       st.admin.username = username;
       st.admin.passwordHash = hashSecret(password);
+      st.admin.initialPassword = password;
       st.admin.updatedAt = new Date().toISOString();
     });
     console.log(`管理员账号已更新为: ${username}`);
@@ -599,6 +661,7 @@ function normalizeInboundPayload(body, existing = null) {
     inbound.grpcServiceName = String(body.grpcServiceName ?? existing?.grpcServiceName ?? 'grpc').trim();
   }
 
+  const clientIdHint = String(body.clientEmail || body.socksUser || remark || tag).trim();
   if (protocol === 'vless') {
     inbound.flow = String(body.flow ?? existing?.flow ?? (security === 'reality' && transport === 'tcp' ? 'xtls-rprx-vision' : '')).trim();
   } else if (protocol === 'shadowsocks') {
@@ -606,19 +669,35 @@ function normalizeInboundPayload(body, existing = null) {
     inbound.password = ensureSsPassword(inbound.method, body.password || existing?.password || '');
     inbound.network = String(body.network || existing?.network || 'tcp,udp').trim();
   } else if (protocol === 'hysteria2') {
-    inbound.password = String(body.password || existing?.password || randomString(20)).trim();
+    const rawHy2Pass = String(body.password || existing?.password || '').trim();
+    inbound.password = (!rawHy2Pass || (!existing && rawHy2Pass === clientIdHint))
+      ? generateStrongCredential(20, { exclude: clientIdHint })
+      : rawHy2Pass;
     inbound.upMbps = Number(body.upMbps ?? existing?.upMbps ?? 100);
     inbound.downMbps = Number(body.downMbps ?? existing?.downMbps ?? 100);
     inbound.obfsPassword = String(body.obfsPassword ?? existing?.obfsPassword ?? '').trim();
   } else if (protocol === 'anytls') {
-    inbound.password = String(body.password || existing?.password || randomString(20)).trim();
+    const rawAnyPass = String(body.password || existing?.password || '').trim();
+    inbound.password = (!rawAnyPass || (!existing && rawAnyPass === clientIdHint))
+      ? generateStrongCredential(20, { exclude: clientIdHint })
+      : rawAnyPass;
   } else if (protocol === 'socks' || protocol === 'mixed' || protocol === 'http') {
-    inbound.socksUser = String(body.socksUser ?? existing?.socksUser ?? `user_${randomString(6)}`).trim();
-    inbound.socksPassword = String(body.socksPassword ?? existing?.socksPassword ?? randomString(16)).trim();
+    const rawUser = String(body.socksUser || existing?.socksUser || '').trim();
+    inbound.socksUser = rawUser || generateStrongCredential(10, { prefix: 'u_' });
+    const rawPass = String(body.socksPassword || existing?.socksPassword || '').trim();
+    inbound.socksPassword = (!rawPass || (!existing && rawPass === inbound.socksUser))
+      ? generateStrongCredential(18, { exclude: inbound.socksUser })
+      : rawPass;
   } else if (protocol === 'trojan') {
-    inbound.password = String(body.password || existing?.password || randomString(20)).trim();
+    const rawTrojanPass = String(body.password || existing?.password || '').trim();
+    inbound.password = (!rawTrojanPass || (!existing && rawTrojanPass === clientIdHint))
+      ? generateStrongCredential(20, { exclude: clientIdHint })
+      : rawTrojanPass;
   } else if (protocol === 'tuic') {
-    inbound.password = String(body.password || existing?.password || randomString(18)).trim();
+    const rawTuicPass = String(body.password || existing?.password || '').trim();
+    inbound.password = (!rawTuicPass || (!existing && rawTuicPass === clientIdHint))
+      ? generateStrongCredential(18, { exclude: clientIdHint })
+      : rawTuicPass;
     inbound.congestionControl = String(body.congestionControl || existing?.congestionControl || 'bbr').trim();
   } else if (protocol === 'direct') {
     inbound.overrideAddress = String(body.overrideAddress ?? existing?.overrideAddress ?? '').trim();
@@ -629,7 +708,16 @@ function normalizeInboundPayload(body, existing = null) {
   if (Array.isArray(body.clients) && body.clients.length > 0) {
     inbound.clients = body.clients.map((c, i) => {
       const prevClient = existing?.clients?.find((ec) => (c.id && ec.id === c.id) || (c.email && ec.email === c.email)) || existing?.clients?.[i] || {};
-      const rawClientPass = String(c.password ?? prevClient.password ?? inbound.password ?? inbound.socksPassword ?? randomString(18)).trim();
+      const cEmailRaw = String(c.email || c.name || prevClient.email || '').trim();
+      const cEmail = (!cEmailRaw || (!existing && cEmailRaw === 'user_1'))
+        ? `${protocol}_${generateStrongCredential(6).toLowerCase()}`
+        : cEmailRaw;
+      const cUsernameRaw = String(c.username || prevClient.username || (i === 0 && inbound.socksUser ? inbound.socksUser : '')).trim();
+      const cUsername = cUsernameRaw || generateStrongCredential(10, { prefix: 'u_', exclude: cEmail });
+      let rawClientPass = String(c.password ?? prevClient.password ?? inbound.password ?? inbound.socksPassword ?? '').trim();
+      if (!rawClientPass || (!existing && protocol !== 'shadowsocks' && (rawClientPass === cUsername || rawClientPass === cEmail))) {
+        rawClientPass = generateStrongCredential(20, { exclude: cUsername });
+      }
       const clientPass = protocol === 'shadowsocks'
         ? (body.clients.length === 1 ? inbound.password : ensureSsPassword(inbound.method, rawClientPass))
         : rawClientPass;
@@ -640,8 +728,8 @@ function normalizeInboundPayload(body, existing = null) {
         id: ['vless', 'vmess', 'tuic'].includes(protocol)
           ? ensureUuid(c.id || c.uuid || prevClient.id)
           : String(c.id || prevClient.id || crypto.randomUUID()),
-        email: String(c.email || c.name || prevClient.email || `${remark}_${i + 1}`).trim(),
-        username: String(c.username || c.email || prevClient.username || `user_${i + 1}`).trim(),
+        email: cEmail,
+        username: cUsername,
         password: clientPass,
         flow: c.flow !== undefined ? c.flow : (prevClient.flow ?? inbound.flow ?? ''),
         subId: String(c.subId || prevClient.subId || randomString(16)).trim(),
@@ -673,12 +761,23 @@ function normalizeInboundPayload(body, existing = null) {
         : (idx === 0 && ['socks', 'mixed', 'http'].includes(inbound.protocol) && inbound.socksPassword ? inbound.socksPassword : c.password)
     }));
   } else if (protocol !== 'direct') {
+    const rawEmail = String(body.clientEmail || '').trim();
+    const defEmail = (rawEmail && rawEmail !== 'user_1')
+      ? rawEmail
+      : `${protocol}_${generateStrongCredential(6).toLowerCase()}`;
+    const defUsername = inbound.socksUser || generateStrongCredential(10, { prefix: 'u_', exclude: defEmail });
+    let defPass = inbound.password || inbound.socksPassword || generateStrongCredential(20, { exclude: defUsername });
+    if (protocol !== 'shadowsocks' && (defPass === defUsername || defPass === defEmail)) {
+      defPass = generateStrongCredential(20, { exclude: defUsername });
+      if (['socks', 'mixed', 'http'].includes(protocol)) inbound.socksPassword = defPass;
+      else inbound.password = defPass;
+    }
     inbound.clients = [
       {
         id: ensureUuid(body.uuid),
-        email: body.clientEmail || `${tag}_user`,
-        username: inbound.socksUser || `user_${randomString(6)}`,
-        password: inbound.password || inbound.socksPassword || randomString(18),
+        email: defEmail,
+        username: defUsername,
+        password: defPass,
         flow: inbound.flow || '',
         subId: randomString(16),
         limitIp: inbound.limitIp,
@@ -1203,12 +1302,18 @@ async function handleRequest(req, res) {
       if (!existing) return sendError(res, 404, '未找到该入站节点');
       const body = await readJson(req);
       if (!Array.isArray(existing.clients)) existing.clients = [];
-      const email = String(body.email || body.name || `${existing.remark}_user_${existing.clients.length + 1}`).trim();
+      const email = String(body.email || body.name || `${existing.protocol}_u_${generateStrongCredential(6).toLowerCase()}`).trim();
       if (existing.clients.some((c) => c.email === email)) {
         return sendError(res, 400, `该节点下已存在同名用户 [${email}]`);
       }
       const isUuidProto = ['vless', 'vmess', 'tuic'].includes(existing.protocol);
-      const rawPass = String(body.password || (existing.protocol === 'shadowsocks' ? generateSsKey(existing.method) : randomString(18))).trim();
+      const username = String(body.username || generateStrongCredential(10, { prefix: 'u_', exclude: email })).trim();
+      let rawPass = String(body.password || '').trim();
+      if (!rawPass || (existing.protocol !== 'shadowsocks' && (rawPass === username || rawPass === email))) {
+        rawPass = existing.protocol === 'shadowsocks'
+          ? generateSsKey(existing.method)
+          : generateStrongCredential(20, { exclude: username });
+      }
       const clientPass = existing.protocol === 'shadowsocks'
         ? ensureSsPassword(existing.method, rawPass)
         : rawPass;
@@ -1218,7 +1323,7 @@ async function handleRequest(req, res) {
       const newClient = {
         id: isUuidProto ? ensureUuid(body.uuid || body.id) : String(body.id || crypto.randomUUID()),
         email,
-        username: String(body.username || email).trim(),
+        username,
         password: clientPass,
         flow: existing.protocol === 'vless' ? String(body.flow ?? existing.flow ?? '') : '',
         subId: String(body.subId || randomString(16)).trim(),
@@ -2073,13 +2178,17 @@ async function handleRequest(req, res) {
         return sendError(res, 400, '当前登录密码验证不正确');
       }
       const nextUser = String(body.username || store.state.admin.username).trim();
-      const nextPass = String(body.newPassword || '');
+      const nextPass = String(body.newPassword || '').trim();
       if (!nextUser) return sendError(res, 400, '管理员账号不能为空');
       if (nextPass && nextPass.length < 6) return sendError(res, 400, '新密码长度至少 6 位');
+      if (nextPass && nextPass === nextUser) return sendError(res, 400, '安全策略限制：登录密码不能与管理员账号相同');
 
       store.transact((st) => {
         st.admin.username = nextUser;
-        if (nextPass) st.admin.passwordHash = hashSecret(nextPass);
+        if (nextPass) {
+          st.admin.passwordHash = hashSecret(nextPass);
+          st.admin.initialPassword = '';
+        }
         st.admin.updatedAt = new Date().toISOString();
         store.addAudit(nextUser, 'update_account', '修改面板登录凭据');
       });

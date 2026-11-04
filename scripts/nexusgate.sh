@@ -24,7 +24,41 @@ need_root() { [[ "${EUID}" -eq 0 ]] || die "请使用 root 权限运行此命令
 
 gen_random_str() {
   local len="${1:-16}"
-  openssl rand -base64 64 2>/dev/null | tr -dc 'a-zA-Z0-9' | cut -c1-"$len" | tr -d '\r\n '
+  local excl="${2:-}"
+  if command -v node >/dev/null 2>&1; then
+    node -e '
+      const crypto = require("crypto");
+      const len = Math.max(4, Number(process.argv[1]) || 16);
+      const excl = String(process.argv[2] || "");
+      const upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+      const lower = "abcdefghijkmnopqrstuvwxyz";
+      const digits = "2345678901";
+      const all = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+      for (let a = 0; a < 10; a++) {
+        const b = crypto.randomBytes(len * 2);
+        const c = [
+          upper[b[0] % upper.length],
+          upper[b[1] % upper.length],
+          lower[b[2] % lower.length],
+          lower[b[3] % lower.length],
+          digits[b[4] % digits.length],
+          digits[b[5] % digits.length]
+        ];
+        for (let i = 6; i < len; i++) c.push(all[b[i] % all.length]);
+        for (let i = c.length - 1; i > 0; i--) {
+          const j = b[len + i] % (i + 1);
+          [c[i], c[j]] = [c[j], c[i]];
+        }
+        const s = c.slice(0, len).join("");
+        if (!excl || (s !== excl && !s.includes(excl))) {
+          process.stdout.write(s);
+          process.exit(0);
+        }
+      }
+      process.stdout.write(crypto.randomBytes(len).toString("base64url").replace(/[^a-zA-Z0-9]/g, "").slice(0, len));
+    ' "$len" "$excl" 2>/dev/null && return 0
+  fi
+  head -c 256 /dev/urandom 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c "$len" || true
 }
 
 pause_return() {
@@ -101,12 +135,16 @@ EOF
 change_account() {
   need_root
   local rand_u="ng_$(gen_random_str 10)"
-  local rand_p="$(gen_random_str 18)"
+  local rand_p="$(gen_random_str 18 "$rand_u")"
   local u="" p=""
-  read -r -p "请输入新的管理员账号 [直接回车使用随机账号 ${rand_u}]: " u </dev/tty
+  read -r -p "请输入新的管理员账号 [直接回车使用高强度随机账号 ${rand_u}]: " u </dev/tty
   u="${u:-$rand_u}"
-  read -r -p "请输入新的管理员密码 [直接回车使用 18 位随机密码 ${rand_p}]: " p </dev/tty
+  read -r -p "请输入新的管理员密码 [直接回车使用 18 位高强度随机密码 ${rand_p}]: " p </dev/tty
   p="${p:-$rand_p}"
+  if [[ "$p" == "$u" ]]; then
+    warn "检测到密码与账号相同，已自动为您生成独立的 18 位高强度随机密码！"
+    p="$(gen_random_str 18 "$u")"
+  fi
   systemctl stop nexusgate.service 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-account "$u" "$p"
   systemctl start nexusgate.service 2>/dev/null || true
@@ -545,7 +583,7 @@ EOF
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
-  ok "NexusGate 面板与管理脚本已更新至 v3.4，所有节点与 Sing-box 内核已重新加载生效！"
+  ok "NexusGate 面板与管理脚本已更新至 v3.6，所有节点与 Sing-box 内核已重新加载生效！"
   show_info
   if [[ -r /dev/tty ]]; then
     pause_return
@@ -570,7 +608,7 @@ show_menu() {
   clear 2>/dev/null || true
   echo -e "
   ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
-  ${cyan}║${plain}     ${green}         NexusGate · 枢门 面板管理脚本 (v3.4)         ${plain}      ${cyan}║${plain}
+  ${cyan}║${plain}     ${green}         NexusGate · 枢门 面板管理脚本 (v3.6)         ${plain}      ${cyan}║${plain}
   ${cyan}║${plain}     ${yellow}全协议节点编排 · BBR+FQ+HY2 加速 · ACME 证书联动${plain}          ${cyan}║${plain}
   ${cyan}╚════════════════════════════════════════════════════════════════╝${plain}
   ${green}0.${plain} 退出脚本

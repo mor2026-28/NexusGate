@@ -59,13 +59,53 @@ function genUuidClient() {
   });
 }
 
-function genRandomAlnum(len = 16) {
-  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let out = '';
-  for (let i = 0; i < len; i += 1) {
-    out += chars[Math.floor(Math.random() * chars.length)];
+function genRandomAlnum(len = 16, exclude = '') {
+  const targetLen = Math.max(4, Number(len) || 16);
+  const excl = String(exclude || '').trim();
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnopqrstuvwxyz';
+  const digits = '2345678901';
+  const all = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+  const getRandBytes = (n) => {
+    if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+      const arr = new Uint32Array(n);
+      window.crypto.getRandomValues(arr);
+      return arr;
+    }
+    return Array.from({ length: n }, () => Math.floor(Math.random() * 0xffffffff));
+  };
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const r = getRandBytes(targetLen * 2);
+    const chars = [];
+    if (targetLen >= 6) {
+      chars.push(upper[r[0] % upper.length]);
+      chars.push(upper[r[1] % upper.length]);
+      chars.push(lower[r[2] % lower.length]);
+      chars.push(lower[r[3] % lower.length]);
+      chars.push(digits[r[4] % digits.length]);
+      chars.push(digits[r[5] % digits.length]);
+      for (let i = 6; i < targetLen; i += 1) {
+        chars.push(all[r[i] % all.length]);
+      }
+      for (let i = chars.length - 1; i > 0; i -= 1) {
+        const j = r[targetLen + i] % (i + 1);
+        const tmp = chars[i];
+        chars[i] = chars[j];
+        chars[j] = tmp;
+      }
+    } else {
+      for (let i = 0; i < targetLen; i += 1) {
+        chars.push(all[r[i] % all.length]);
+      }
+    }
+    const candidate = chars.join('');
+    if (!excl || (candidate !== excl && !candidate.includes(excl) && !excl.includes(candidate))) {
+      return candidate;
+    }
   }
-  return out;
+  return getRandBytes(targetLen).map((x) => all[x % all.length]).join('');
 }
 
 function makeQrSvg(text) {
@@ -1553,7 +1593,10 @@ async function openInboundModal(existing = null, preset = '') {
   const defKeyFile = realCert?.keyPath || state.defaultSettings?.defaultKeyFile || state.settings?.webKeyFile || '';
 
   const newUuid = genUuidClient();
-  const newPass = genRandomAlnum(20);
+  const newClientTag = `vless_${genRandomAlnum(6).toLowerCase()}`;
+  const newPass = genRandomAlnum(20, newClientTag);
+  const newSocksUser = `u_${genRandomAlnum(8)}`;
+  const newSocksPass = genRandomAlnum(18, newSocksUser);
   const portRand = Math.floor(Math.random() * 40000) + 15000;
 
   const item = existing ? JSON.parse(JSON.stringify(existing)) : {
@@ -1568,6 +1611,8 @@ async function openInboundModal(existing = null, preset = '') {
     method: '2022-blake3-aes-128-gcm',
     uuid: newUuid,
     password: newPass,
+    socksUser: newSocksUser,
+    socksPassword: newSocksPass,
     outboundTag: 'default',
     limitIp: 0,
     limitDevice: 0,
@@ -1585,7 +1630,7 @@ async function openInboundModal(existing = null, preset = '') {
       shortIds: ['1a2b3c4d'],
       fingerprint: 'chrome'
     },
-    clients: [{ email: 'user_1', id: newUuid, password: newPass, flow: 'xtls-rprx-vision', enable: true }]
+    clients: [{ email: newClientTag, username: newSocksUser, id: newUuid, password: newPass, flow: 'xtls-rprx-vision', enable: true }]
   };
 
   if (item.reality && ['www.cloudflare.com', 'cloudflare.com', 'www.bing.com'].includes(String(item.reality.serverName || '').toLowerCase())) {
@@ -1744,6 +1789,13 @@ async function openInboundModal(existing = null, preset = '') {
         };
         remInput.value = `${protoLabelMap[proto] || proto.toUpperCase()}-${curPort}`;
       }
+      if (!c0.email || /^[a-z0-9]+_[a-z0-9]{6}$/i.test(c0.email) || c0.email === 'user_1') {
+        c0.email = `${proto}_${genRandomAlnum(6).toLowerCase()}`;
+      }
+      if (proto !== 'shadowsocks') {
+        item.password = genRandomAlnum(20, c0.email);
+        c0.password = item.password;
+      }
     }
 
     if (proto === 'direct') {
@@ -1788,7 +1840,10 @@ async function openInboundModal(existing = null, preset = '') {
         </label>
         <label class="wide">
           客户端标识名称 (Email/Remark)
-          <input name="clientEmail" value="${esc(c0.email || 'ss_client_1')}">
+          <div class="input-row">
+            <input name="clientEmail" id="inb-client-email" value="${esc(c0.email || `ss_${genRandomAlnum(6).toLowerCase()}`)}">
+            <button type="button" data-action="gen-client-email">🎲 随机标识</button>
+          </div>
         </label>
       `;
 
@@ -1812,15 +1867,24 @@ async function openInboundModal(existing = null, preset = '') {
     }
 
     if (proto === 'socks' || proto === 'mixed' || proto === 'http') {
+      const initSocksU = item.socksUser || c0.username || `u_${genRandomAlnum(8)}`;
+      const rawSocksP = item.socksPassword || c0.password || '';
+      const initSocksP = (!rawSocksP || rawSocksP === initSocksU) ? genRandomAlnum(18, initSocksU) : rawSocksP;
       box.innerHTML = `
-        <div class="section-title">${proto.toUpperCase()} 认证凭据</div>
+        <div class="section-title">${proto.toUpperCase()} 独立高强度认证凭据</div>
         <label>
-          用户名 (Username)
-          <input name="socksUser" value="${esc(item.socksUser || c0.username || `user_${genRandomAlnum(6)}`)}" required>
+          认证账号 (Username)
+          <div class="input-row">
+            <input name="socksUser" id="inb-socks-user" value="${esc(initSocksU)}" required>
+            <button type="button" data-action="gen-socks-user">🎲 随机账号</button>
+          </div>
         </label>
         <label>
-          密码 (Password)
-          <input name="socksPassword" value="${esc(item.socksPassword || c0.password || genRandomAlnum(16))}" required>
+          认证密码 (Password · 18位高强度随机)
+          <div class="input-row">
+            <input name="socksPassword" id="inb-socks-pass" value="${esc(initSocksP)}" required>
+            <button type="button" data-action="gen-clean-pass" data-target="inb-socks-pass">🎲 随机密码</button>
+          </div>
         </label>
       `;
       return;
@@ -1837,8 +1901,11 @@ async function openInboundModal(existing = null, preset = '') {
           </div>
         </label>
         <label>
-          客户端标识 (用户名)
-          <input name="clientEmail" value="${esc(c0.email || 'anytls_user')}">
+          客户端标识 (备注标识)
+          <div class="input-row">
+            <input name="clientEmail" id="inb-client-email" value="${esc(c0.email || `anytls_${genRandomAlnum(6).toLowerCase()}`)}">
+            <button type="button" data-action="gen-client-email">🎲 随机</button>
+          </div>
         </label>
         <label>
           选择已管理证书 / SNI 域名
@@ -1927,7 +1994,10 @@ async function openInboundModal(existing = null, preset = '') {
       `}
       <label>
         客户端备注标识 (Email)
-        <input name="clientEmail" value="${esc(c0.email || `${proto}_user_1`)}">
+        <div class="input-row">
+          <input name="clientEmail" id="inb-client-email" value="${esc(c0.email || `${proto}_${genRandomAlnum(6).toLowerCase()}`)}">
+          <button type="button" data-action="gen-client-email">🎲 随机</button>
+        </div>
       </label>
 
       <label>
@@ -2063,11 +2133,13 @@ function openClientModal(inbound, existingClient = null) {
   const isEdit = Boolean(existingClient);
   const isUuidProto = ['vless', 'vmess', 'tuic'].includes(inbound.protocol);
   const isSocksProto = ['socks', 'mixed', 'http'].includes(inbound.protocol);
+  const randUser = `u_${genRandomAlnum(8)}`;
+  const randEmail = `${inbound.protocol}_u_${genRandomAlnum(6).toLowerCase()}`;
   const c = existingClient ? JSON.parse(JSON.stringify(existingClient)) : {
     id: isUuidProto ? genUuidClient() : '',
-    email: `${inbound.remark}_user_${(inbound.clients?.length || 0) + 1}`,
-    username: `user_${genRandomAlnum(6)}`,
-    password: genRandomAlnum(20),
+    email: randEmail,
+    username: randUser,
+    password: genRandomAlnum(20, randUser),
     flow: inbound.protocol === 'vless' ? (inbound.flow || '') : '',
     limitIp: 0,
     limitDevice: 0,
@@ -2087,12 +2159,25 @@ function openClientModal(inbound, existingClient = null) {
     <form id="client-form" data-inbound-id="${esc(inbound.id)}" data-client-id="${esc(isEdit ? c.id : '')}" class="form-grid">
       <label>
         客户 / 用户备注名称 (Email / 标识)
-        <input name="email" value="${esc(c.email || '')}" required placeholder="例如: client_01 或 VIP_User">
+        <div class="input-row">
+          <input name="email" id="client-modal-email" value="${esc(c.email || '')}" required placeholder="例如: client_01 或 VIP_User">
+          <button type="button" data-action="gen-client-modal-email">🎲 随机标识</button>
+        </div>
       </label>
       <label style="flex-direction:row;align-items:center;gap:8px;padding-top:22px">
         <input type="checkbox" name="enable" style="width:18px;min-height:18px" ${c.enable !== false ? 'checked' : ''}>
         <span><b>启用该用户</b>（停用后仅断开该用户，不影响同节点下其他用户）</span>
       </label>
+
+      ${isSocksProto ? `
+        <label class="wide">
+          认证账号 (Username · 与密码独立随机生成)
+          <div class="input-row">
+            <input name="username" id="client-modal-user" value="${esc(c.username || randUser)}" required>
+            <button type="button" data-action="gen-client-modal-user">🎲 随机账号</button>
+          </div>
+        </label>
+      ` : ''}
 
       ${isUuidProto ? `
         <label class="wide">
@@ -2106,9 +2191,9 @@ function openClientModal(inbound, existingClient = null) {
 
       ${!isUuidProto || inbound.protocol === 'tuic' ? `
         <label class="wide">
-          ${isSocksProto ? '认证密码 (Password)' : '用户专属连接密码 (Password)'}
+          ${isSocksProto ? '认证密码 (Password · 20位高强度随机)' : '用户专属连接密码 (Password · 20位高强度随机)'}
           <div class="input-row">
-            <input name="password" id="client-modal-pass" value="${esc(c.password || genRandomAlnum(20))}" required>
+            <input name="password" id="client-modal-pass" value="${esc(c.password || genRandomAlnum(20, c.username || c.email))}" required>
             <button type="button" data-action="gen-clean-pass" data-target="client-modal-pass">🎲 随机密码</button>
           </div>
         </label>
@@ -2836,7 +2921,25 @@ document.addEventListener('click', async (e) => {
     }
     else if (action === 'gen-clean-pass') {
       const target = $(`#${actEl.dataset.target}`);
-      if (target) target.value = genRandomAlnum(20);
+      const otherVal = $('#inb-socks-user')?.value || $('#client-modal-user')?.value || $('#inb-client-email')?.value || '';
+      if (target) target.value = genRandomAlnum(20, otherVal);
+    }
+    else if (action === 'gen-socks-user') {
+      const el = $('#inb-socks-user');
+      if (el) el.value = `u_${genRandomAlnum(8)}`;
+    }
+    else if (action === 'gen-client-email') {
+      const el = $('#inb-client-email');
+      const proto = $('#inb-proto-select')?.value || 'node';
+      if (el) el.value = `${proto}_${genRandomAlnum(6).toLowerCase()}`;
+    }
+    else if (action === 'gen-client-modal-email') {
+      const el = $('#client-modal-email');
+      if (el) el.value = `user_${genRandomAlnum(6).toLowerCase()}`;
+    }
+    else if (action === 'gen-client-modal-user') {
+      const el = $('#client-modal-user');
+      if (el) el.value = `u_${genRandomAlnum(8)}`;
     }
     else if (action === 'gen-reality-keys') {
       const kp = await api('/api/tools/reality-keypair', { method: 'POST' });
@@ -3173,11 +3276,13 @@ document.addEventListener('click', async (e) => {
     }
     else if (action === 'random-account-user') {
       const el = $('#account-user-input');
-      if (el) el.value = `ng_${genRandomAlnum(10)}`;
+      const passVal = $('#account-pass-input')?.value || '';
+      if (el) el.value = `ng_${genRandomAlnum(10, passVal)}`;
     }
     else if (action === 'random-account-pass') {
       const el = $('#account-pass-input');
-      if (el) el.value = genRandomAlnum(18);
+      const userVal = $('#account-user-input')?.value || '';
+      if (el) el.value = genRandomAlnum(18, userVal);
     }
     else if (action === 'restore-backup-modal') {
       openModal('导入恢复面板备份', '粘贴备份 JSON 内容', `
@@ -3325,8 +3430,12 @@ document.addEventListener('submit', async (e) => {
       const inboundId = form.dataset.inboundId;
       const clientId = form.dataset.clientId;
       const expiryMs = data.expiryTime ? new Date(data.expiryTime).getTime() : 0;
+      if (data.username && data.password && data.username.trim() === data.password.trim()) {
+        throw new Error('安全限制：用户的认证账号与认证密码不能相同，请点击随机密码重新生成');
+      }
       const payload = {
         email: data.email,
+        username: data.username,
         uuid: data.uuid,
         password: data.password,
         limitIp: Number(data.limitIp || 0),
@@ -3438,6 +3547,9 @@ document.addEventListener('submit', async (e) => {
       }
     }
     else if (form.id === 'account-form') {
+      if (data.username && data.newPassword && data.username.trim() === data.newPassword.trim()) {
+        throw new Error('安全策略限制：新登录密码不能与管理员账号相同');
+      }
       await api('/api/auth/account', { method: 'POST', body: JSON.stringify(data) });
       toast('管理员账号与密码已更新，请重新登录');
       showLogin();

@@ -15,6 +15,7 @@ SB_VERSION="${NG_SINGBOX_VERSION:-1.12.23}"
 INSTALL_DIR="/opt/nexusgate"
 DATA_DIR="/var/lib/nexusgate"
 CONF_DIR="/etc/nexusgate"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
 
 die() { echo -e "${red}[错误]${plain} $*" >&2; exit 1; }
 info() { echo -e "${cyan}[NexusGate]${plain} $*"; }
@@ -25,10 +26,52 @@ warn() { echo -e "${yellow}[提示]${plain} $*"; }
 
 gen_random_str() {
   local len="${1:-16}"
-  openssl rand -base64 64 2>/dev/null | tr -dc 'a-zA-Z0-9' | cut -c1-"$len" | tr -d '\r\n '
+  local excl="${2:-}"
+  if command -v node >/dev/null 2>&1; then
+    node -e '
+      const crypto = require("crypto");
+      const len = Math.max(4, Number(process.argv[1]) || 16);
+      const excl = String(process.argv[2] || "");
+      const upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+      const lower = "abcdefghijkmnopqrstuvwxyz";
+      const digits = "2345678901";
+      const all = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+      for (let a = 0; a < 10; a++) {
+        const b = crypto.randomBytes(len * 2);
+        const c = [
+          upper[b[0] % upper.length],
+          upper[b[1] % upper.length],
+          lower[b[2] % lower.length],
+          lower[b[3] % lower.length],
+          digits[b[4] % digits.length],
+          digits[b[5] % digits.length]
+        ];
+        for (let i = 6; i < len; i++) c.push(all[b[i] % all.length]);
+        for (let i = c.length - 1; i > 0; i--) {
+          const j = b[len + i] % (i + 1);
+          [c[i], c[j]] = [c[j], c[i]];
+        }
+        const s = c.slice(0, len).join("");
+        if (!excl || (s !== excl && !s.includes(excl))) {
+          process.stdout.write(s);
+          process.exit(0);
+        }
+      }
+      process.stdout.write(crypto.randomBytes(len).toString("base64url").replace(/[^a-zA-Z0-9]/g, "").slice(0, len));
+    ' "$len" "$excl" 2>/dev/null && return 0
+  fi
+  local out=""
+  out="$(head -c 256 /dev/urandom 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c "$len" || true)"
+  if [[ ${#out} -lt "$len" ]]; then
+    out="$(openssl rand -hex 32 2>/dev/null | head -c "$len" || echo "Ng9kP2mX8vQ4rL7wB5")"
+  fi
+  printf '%s' "$out"
 }
 
 gen_random_port() {
+  if command -v node >/dev/null 2>&1; then
+    node -e 'process.stdout.write(String(require("crypto").randomInt(15000, 60001)))' 2>/dev/null && return 0
+  fi
   shuf -i 15000-60000 -n 1 2>/dev/null || echo $(( (RANDOM % 45000) + 15000 ))
 }
 
@@ -95,17 +138,35 @@ download_panel_source() {
   tmp="$(mktemp -d /tmp/nexusgate-src.XXXXXX)"
   trap 'rm -rf -- "$tmp"' RETURN
 
-  if [[ -f "./server.js" && -f "./public/app.js" ]]; then
-    info "检测到当前目录包含完整源码，直接从本地复制安装..."
-    mkdir -p "$INSTALL_DIR"
-    cp -a ./* "$INSTALL_DIR/"
+  local local_src=""
+  if [[ -f "${SCRIPT_DIR}/server.js" && -f "${SCRIPT_DIR}/public/app.js" ]]; then
+    local_src="${SCRIPT_DIR}"
+  elif [[ -f "${SCRIPT_DIR}/../server.js" && -f "${SCRIPT_DIR}/../public/app.js" ]]; then
+    local_src="$(cd "${SCRIPT_DIR}/.." && pwd)"
+  elif [[ -f "./server.js" && -f "./public/app.js" ]]; then
+    local_src="$(pwd)"
+  elif [[ -f "${INSTALL_DIR}/server.js" && -f "${INSTALL_DIR}/public/app.js" ]]; then
+    local_src="${INSTALL_DIR}"
+  fi
+
+  mkdir -p "$INSTALL_DIR"
+  if [[ -n "$local_src" ]]; then
+    local real_src real_dst
+    real_src="$(cd "$local_src" && pwd)"
+    real_dst="$(cd "$INSTALL_DIR" && pwd)"
+    if [[ "$real_src" != "$real_dst" ]]; then
+      info "检测到本地完整源码 (${real_src})，直接复制安装..."
+      cp -a "${real_src}/." "$INSTALL_DIR/"
+    else
+      info "源码已位于安装目录 (${INSTALL_DIR})，直接进行初始化配置..."
+    fi
   else
     info "正在从 GitHub (${REPO}@${BRANCH}) 下载最新面板源码..."
     curl -fL --retry 3 "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz" -o "$tmp/source.tar.gz"
-    mkdir -p "$INSTALL_DIR"
     tar -xzf "$tmp/source.tar.gz" -C "$INSTALL_DIR" --strip-components=1
   fi
 
+  rm -rf "$INSTALL_DIR/data" 2>/dev/null || true
   [[ -f "$INSTALL_DIR/server.js" ]] || die "安装包不完整，未找到 server.js"
 }
 
@@ -153,7 +214,7 @@ configure_panel() {
   local default_port default_user default_pass default_path
   default_port="$(gen_random_port)"
   default_user="ng_$(gen_random_str 10)"
-  default_pass="$(gen_random_str 18)"
+  default_pass="$(gen_random_str 18 "$default_user")"
   default_path="/$(gen_random_str 16)/"
 
   local panel_port="$default_port"
@@ -163,18 +224,30 @@ configure_panel() {
 
   if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
     echo ""
-    echo -e "${cyan}=== NexusGate · 枢门 面板初始化安全配置 (直接回车使用高强度随机值) ===${plain}"
-    read -r -p "请输入面板端口 [默认随机: ${default_port}]: " input_port </dev/tty || true
-    [[ -n "${input_port:-}" ]] && panel_port="${input_port//[^0-9]/}"
+    echo -e "${cyan}=== NexusGate · 枢门 v3.6 已生成本机专属高强度随机登录凭据 ===${plain}"
+    echo -e "  • 随机面板端口 : ${yellow}${default_port}${plain}"
+    echo -e "  • 随机管理账号 : ${green}${default_user}${plain}"
+    echo -e "  • 随机高强密码 : ${green}${default_pass}${plain} (18位大小写字母+数字高强度混合)"
+    echo -e "  • 随机安全路径 : ${yellow}${default_path}${plain} (16位防扫描安全根路径)"
+    local use_custom="n"
+    read -t 8 -r -p "是否直接使用以上随机高强度配置？[Y/n (直接回车或8秒后自动使用随机配置，输入 n 可手动自定义)]: " use_custom </dev/tty || true
+    if [[ "${use_custom:-Y}" =~ ^[Nn]$ ]]; then
+      read -r -p "请输入自定义面板端口 [默认随机: ${default_port}]: " input_port </dev/tty || true
+      [[ -n "${input_port:-}" ]] && panel_port="${input_port//[^0-9]/}"
 
-    read -r -p "请输入管理员账号 [默认随机: ${default_user}]: " input_user </dev/tty || true
-    [[ -n "${input_user:-}" ]] && admin_user="$(echo "$input_user" | tr -d '\r\n ')"
+      read -r -p "请输入自定义管理员账号 [默认随机: ${default_user}]: " input_user </dev/tty || true
+      [[ -n "${input_user:-}" ]] && admin_user="$(echo "$input_user" | tr -d '\r\n ')"
 
-    read -r -p "请输入管理员密码 [默认随机 18 位: ${default_pass}]: " input_pass </dev/tty || true
-    [[ -n "${input_pass:-}" ]] && admin_pass="$(echo "$input_pass" | tr -d '\r\n ')"
+      read -r -p "请输入自定义管理员密码 [默认随机 18 位: ${default_pass}]: " input_pass </dev/tty || true
+      [[ -n "${input_pass:-}" ]] && admin_pass="$(echo "$input_pass" | tr -d '\r\n ')"
+      if [[ "$admin_pass" == "$admin_user" ]]; then
+        warn "检测到输入的密码与账号相同，已自动为您生成独立 18 位高强度随机密码！"
+        admin_pass="$(gen_random_str 18 "$admin_user")"
+      fi
 
-    read -r -p "请输入面板 16 位安全路径 [默认随机: ${default_path}]: " input_path </dev/tty || true
-    [[ -n "${input_path:-}" ]] && base_path="$(echo "$input_path" | tr -d '\r\n ')"
+      read -r -p "请输入自定义面板安全路径 [默认随机: ${default_path}]: " input_path </dev/tty || true
+      [[ -n "${input_path:-}" ]] && base_path="$(echo "$input_path" | tr -d '\r\n ')"
+    fi
   fi
 
   local pub_ip=""
@@ -191,21 +264,12 @@ EOF
 
   rm -rf /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
 
-  NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --set-account "$admin_user" "$admin_pass" >/dev/null
-  NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --set-port "$panel_port" >/dev/null
-  NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --set-path "$base_path" >/dev/null
-
-  if [[ -n "$pub_ip" ]]; then
-    python3 - "$DATA_DIR/nexusgate.json" "$pub_ip" <<'PY' 2>/dev/null || true
-import json, sys
-p, ip = sys.argv[1], sys.argv[2]
-d = json.load(open(p))
-d.setdefault("settings", {})["publicIPv4"] = ip.strip()
-json.dump(d, open(p, "w"))
-PY
-  fi
-
-  NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --issue-selfsigned "www.apple.com" "$pub_ip" >/dev/null
+  local init_json
+  init_json="$(NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --init-panel "$panel_port" "$admin_user" "$admin_pass" "$base_path" "$pub_ip")"
+  admin_user="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.username||""))')"
+  admin_pass="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.password||""))')"
+  panel_port="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.port||""))')"
+  base_path="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.basePath||"/"))')"
 
   if [[ -f /etc/x-ui/x-ui.db || -f /root/3xui_backup.tar.gz ]]; then
     local found_xui="/etc/x-ui/x-ui.db"
@@ -213,7 +277,7 @@ PY
     warn "检测到本机已存在备份数据 (${found_xui})！"
     local do_mig="y"
     if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
-      read -r -p "是否立即执行备份迁移恢复全部入站节点、中转出站、分流规则与证书？[Y/n]: " do_mig </dev/tty || true
+      read -t 10 -r -p "是否立即执行备份迁移恢复全部入站节点、中转出站、分流规则与证书？[Y/n]: " do_mig </dev/tty || true
     fi
     if [[ "${do_mig:-y}" =~ ^[Yy]?$ ]]; then
       NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --migrate-3xui "$found_xui" merge || warn "自动迁移可在登录面板后通过【备份迁移】页面操作"
@@ -235,6 +299,11 @@ PY
     ln -sf /usr/local/bin/nexusgate /usr/local/bin/x-ui
   fi
 
+  local info_json login_url cert_domain
+  info_json="$(NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --show-info-json)"
+  login_url="$(echo "$info_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.url||""))' 2>/dev/null || echo "")"
+  cert_domain="$(echo "$info_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.defaultNodeTlsDomain||""))' 2>/dev/null || echo "")"
+
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     systemctl daemon-reload
     systemctl reset-failed nexusgate.service nexusgate-singbox.service 2>/dev/null || true
@@ -247,14 +316,9 @@ PY
     nohup env NG_DATA_FILE="${DATA_DIR}/nexusgate.json" MALLOC_ARENA_MAX=2 node --expose-gc --max-semi-space-size=8 --max-old-space-size=256 "$INSTALL_DIR/server.js" >/var/log/nexusgate.log 2>&1 &
   fi
 
-  local info_json login_url cert_domain
-  info_json="$(NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --show-info-json)"
-  login_url="$(echo "$info_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("url",""))' 2>/dev/null || echo "")"
-  cert_domain="$(echo "$info_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("defaultNodeTlsDomain",""))' 2>/dev/null || echo "")"
-
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate · 枢门 v3.4 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate · 枢门 v3.6 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
   echo -e " 访问地址   : ${cyan}${login_url}${plain}"
   echo -e " 登录账号   : ${green}${admin_user}${plain}"
