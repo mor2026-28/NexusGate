@@ -880,6 +880,7 @@ function enrichInboundWithLinks(inbound, reqHost = '') {
 }
 
 let _bgApplyQueued = false;
+let _bgHadConfigChange = false;
 const _bgPendingPorts = new Set();
 
 function autoApplyIfEnabled(portsToOpen = []) {
@@ -888,6 +889,7 @@ function autoApplyIfEnabled(portsToOpen = []) {
   try {
     writeResult = singbox.writeConfig();
   } catch { /* ignore */ }
+  if (writeResult.changed) _bgHadConfigChange = true;
 
   for (const p of portsToOpen) {
     const n = Number(p);
@@ -898,9 +900,10 @@ function autoApplyIfEnabled(portsToOpen = []) {
   //    so HTTP responses return in < 10ms and modals close instantaneously!
   if (_bgApplyQueued) return;
   _bgApplyQueued = true;
-  const hadConfigChange = Boolean(writeResult.changed);
   setImmediate(() => {
     _bgApplyQueued = false;
+    const hadConfigChange = _bgHadConfigChange;
+    _bgHadConfigChange = false;
     if (_bgPendingPorts.size > 0) {
       const ports = [..._bgPendingPorts];
       _bgPendingPorts.clear();
@@ -2219,10 +2222,12 @@ async function handleRequest(req, res) {
         if (data.routing) st.routing = data.routing;
         if (data.dns) st.dns = data.dns;
         if (data.certificates) st.certificates = data.certificates;
+        syncRoutingRulesToInbounds(st);
         store.addAudit(session.username, 'restore_backup', `恢复 ${data.inbounds.length} 个入站`);
       });
-      autoApplyIfEnabled();
-      return sendJson(res, 200, { ok: true });
+      const restoredPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
+      autoApplyIfEnabled(restoredPorts);
+      return sendJson(res, 200, { ok: true, inboundsCount: store.state.inbounds.length, outboundsCount: store.state.outbounds.length });
     }
 
     return sendError(res, 404, `未找到接口: ${pathname}`, 'not_found');

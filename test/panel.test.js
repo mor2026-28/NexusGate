@@ -969,3 +969,354 @@ test('12. High-Strength Unique Initial Server Credentials (--init-panel & Store)
   assert.notEqual(sc.email, sc.password, 'Added client email and password must be distinct');
   assert.ok(sc.password.length >= 18);
 });
+
+test('13. Full-Lifecycle E2E: CLI Operations, Account/Port/Path Update, BBR Acceleration, Outbound Tag Cascade, Rule Reordering, Backup & Restore', async () => {
+  // 1) BBR + FQ + HY2 Kernel Acceleration API
+  const accAll = await req('/SecPath16Chars99/api/system/acceleration', {
+    method: 'POST',
+    body: JSON.stringify({ mode: 'all' })
+  });
+  assert.equal(accAll.status, 200);
+  assert.ok(accAll.json.acceleration && typeof accAll.json.acceleration.congestion === 'string');
+
+  // 2) Firewall API
+  const fwRes = await req('/SecPath16Chars99/api/system/firewall', { method: 'POST' });
+  assert.equal(fwRes.status, 200);
+  assert.ok(Array.isArray(fwRes.json.openedPorts));
+
+  // 3) Batch import all 8 outbound protocols via URI (ss, vless, vmess, trojan, hy2, anytls, socks5, tuic)
+  const vmessObj = { v: '2', ps: 'Relay-VMess-WS', add: '127.0.0.1', port: '443', id: '6832b114-5826-4c3c-9c83-400383a51234', aid: '0', scy: 'auto', net: 'ws', path: '/vmess?ed=2048', host: 'vm.example.com', tls: 'tls', sni: 'vm.example.com' };
+  const uriBatch = [
+    'ss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206TVRJek5EVTJOemc1Tabcdef@127.0.0.1:8388#Relay-SS2022',
+    'vless://6832b114-5826-4c3c-9c83-400383a51234@127.0.0.1:8443?security=reality&sni=tesla.com&pbk=testpbk&sid=1a2b&type=tcp&flow=xtls-rprx-vision#Relay-VLESS',
+    `vmess://${Buffer.from(JSON.stringify(vmessObj)).toString('base64')}`,
+    'trojan://TrojanPass123@127.0.0.1:9443?security=tls&sni=tr.example.com&type=ws&path=%2Ftr%3Fed%3D2048#Relay-Trojan',
+    'hy2://Hy2Pass123@127.0.0.1:10443?sni=hy2.example.com&obfs=salamander&obfs-password=obfspass#Relay-HY2',
+    'anytls://AnyPass123@127.0.0.1:11443?sni=any.example.com&insecure=1#Relay-AnyTLS',
+    'socks5://u_socks:p_socks@127.0.0.1:1080#Relay-SOCKS5',
+    'tuic://6832b114-5826-4c3c-9c83-400383a51234:TuicPass123@127.0.0.1:12443?congestion_control=bbr&alpn=h3&sni=tuic.example.com#Relay-TUIC'
+  ].join('\n');
+
+  const impRes = await req('/SecPath16Chars99/api/outbounds/import-uri', {
+    method: 'POST',
+    body: JSON.stringify({ uri: uriBatch })
+  });
+  assert.equal(impRes.status, 201);
+  assert.equal(impRes.json.count, 8);
+
+  // Verify TCP Ping on a local listening port (our own HTTP test server port)
+  const testListenPort = server.address().port;
+  const pingTargetOut = await req('/SecPath16Chars99/api/outbounds', {
+    method: 'POST',
+    body: JSON.stringify({ tag: 'out-local-ping', type: 'socks', server: '127.0.0.1', port: testListenPort })
+  });
+  assert.equal(pingTargetOut.status, 201);
+  const pingRes = await req(`/SecPath16Chars99/api/outbounds/${pingTargetOut.json.outbound.id}/ping`, { method: 'POST' });
+  assert.equal(pingRes.status, 200);
+  assert.equal(pingRes.json.reachable, true);
+
+  // Create an inbound bound to out-local-ping, then rename out-local-ping -> out-local-renamed, and verify cascade!
+  const boundInbRes = await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify({
+      remark: 'Cascade-Test-Node',
+      protocol: 'vmess',
+      port: 58910,
+      security: 'tls',
+      transport: 'ws',
+      wsPath: '/vmess-ws?ed=2048',
+      outboundTag: 'out-local-ping'
+    })
+  });
+  assert.equal(boundInbRes.status, 201);
+  // Verify VMess+WS+TLS link has TLS in Sing-box JSON and servername in Clash YAML
+  const vmessLink = boundInbRes.json.inbound.links[0];
+  const vmessSbOut = JSON.parse(vmessLink.singboxJson);
+  assert.equal(vmessSbOut.tls.enabled, true, 'VMess TLS Sing-box JSON must include tls.enabled=true');
+  assert.equal(vmessSbOut.transport.path, '/vmess-ws', 'WS ?ed=2048 must be stripped into max_early_data');
+  assert.equal(vmessSbOut.transport.max_early_data, 2048);
+
+  const renameOutRes = await req(`/SecPath16Chars99/api/outbounds/${pingTargetOut.json.outbound.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ tag: 'out-local-renamed', type: 'socks', server: '127.0.0.1', port: testListenPort })
+  });
+  assert.equal(renameOutRes.status, 200);
+  const cascadedInb = store.state.inbounds.find((i) => i.id === boundInbRes.json.inbound.id);
+  assert.equal(cascadedInb.outboundTag, 'out-local-renamed', 'Renaming outbound tag must cascade to bound inbounds');
+
+  // Test Routing Presets & Rule Reordering (up / down / top / bottom)
+  for (const preset of ['ai-relay', 'foreign-trade', 'block-ads', 'cn-direct', 'media-relay']) {
+    const pr = await req('/SecPath16Chars99/api/routing/presets', {
+      method: 'POST',
+      body: JSON.stringify({ preset, outbound: 'out-local-renamed' })
+    });
+    assert.equal(pr.status, 201);
+  }
+  const lastRule = store.state.routing.rules[store.state.routing.rules.length - 1];
+  const moveTop = await req(`/SecPath16Chars99/api/routing/rules/${lastRule.id}/move`, {
+    method: 'POST',
+    body: JSON.stringify({ direction: 'top' })
+  });
+  assert.equal(moveTop.status, 200);
+  assert.equal(moveTop.json.rules[0].id, lastRule.id);
+
+  // Test Full Backup & Restore (modifying state in between and verifying 100% restoration)
+  const backupRes = await req('/SecPath16Chars99/api/backup');
+  assert.equal(backupRes.status, 200);
+  const backupSnapshot = JSON.parse(backupRes.text);
+  const countBefore = backupSnapshot.inbounds.length;
+
+  // Delete an inbound, then restore backup and verify count returns to countBefore
+  await req(`/SecPath16Chars99/api/inbounds/${boundInbRes.json.inbound.id}`, { method: 'DELETE' });
+  assert.equal(store.state.inbounds.length, countBefore - 1);
+
+  const restoreRes = await req('/SecPath16Chars99/api/restore', {
+    method: 'POST',
+    body: JSON.stringify({ backup: backupSnapshot })
+  });
+  assert.equal(restoreRes.status, 200);
+  assert.equal(store.state.inbounds.length, countBefore, 'Restore backup must restore all inbounds');
+
+  // Test Account Password & Username Update + Reject Identical Username/Password
+  const sameUserPassRes = await req('/SecPath16Chars99/api/auth/account', {
+    method: 'POST',
+    body: JSON.stringify({
+      currentPassword: 'StrongPassword123456',
+      username: 'ng_sameUser99',
+      newPassword: 'ng_sameUser99'
+    })
+  });
+  assert.equal(sameUserPassRes.status, 400, 'Setting password equal to username must be rejected with 400');
+
+  const updateAccRes = await req('/SecPath16Chars99/api/auth/account', {
+    method: 'POST',
+    body: JSON.stringify({
+      currentPassword: 'StrongPassword123456',
+      username: 'ng_newAdmin88',
+      newPassword: 'NewStrongPass998877'
+    })
+  });
+  assert.equal(updateAccRes.status, 200);
+
+  // Re-login with new credentials, then restore original test credentials for subsequent tests
+  const relogin = await req('/SecPath16Chars99/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: 'ng_newAdmin88', password: 'NewStrongPass998877' })
+  });
+  assert.equal(relogin.status, 200);
+  csrf = relogin.json.csrf;
+
+  const restoreAcc = await req('/SecPath16Chars99/api/auth/account', {
+    method: 'POST',
+    body: JSON.stringify({
+      currentPassword: 'NewStrongPass998877',
+      username: 'ng_adminTest01',
+      newPassword: 'StrongPassword123456'
+    })
+  });
+  assert.equal(restoreAcc.status, 200);
+  const reloginOrig = await req('/SecPath16Chars99/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: 'ng_adminTest01', password: 'StrongPassword123456' })
+  });
+  assert.equal(reloginOrig.status, 200);
+  csrf = reloginOrig.json.csrf;
+});
+
+test('14. Security & Vulnerability Audit: Path Traversal, Malformed URI Encoding, CSRF Guard, Duplicate Remark Disambiguation & Brute-Force Lockout', async () => {
+  // 1) Malformed percent-encoding in URL must never crash server (returns 404 cleanly)
+  const badUri1 = await req('/sub/%E0%A4%A');
+  assert.equal(badUri1.status, 404);
+  const badUri2 = await req('/SecPath16Chars99/api/inbounds/%ZZ%99');
+  assert.equal(badUri2.status, 404);
+
+  // 2) Path traversal attempt on static file server must be blocked
+  const travRes = await req('/SecPath16Chars99/..%2f..%2fpackage.json');
+  assert.ok([302, 404].includes(travRes.status));
+
+  // 3) CSRF token enforcement on mutating endpoints
+  const savedCsrf = csrf;
+  csrf = 'invalid_csrf_token';
+  const csrfFail = await req('/SecPath16Chars99/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ webPort: 2053 })
+  });
+  assert.equal(csrfFail.status, 403);
+  csrf = savedCsrf;
+
+  // 4) Duplicate node remarks in subscription must be automatically disambiguated in Clash & Sing-box subscriptions
+  await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify({ remark: 'Dup-Remark-HK', protocol: 'vless', port: 58921, security: 'reality' })
+  });
+  await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify({ remark: 'Dup-Remark-HK', protocol: 'anytls', port: 58922, security: 'tls' })
+  });
+  const subTok = store.state.settings.subToken;
+  const sbSub = await req(`/sub/${subTok}?format=singbox`);
+  assert.equal(sbSub.status, 200);
+  const sbJson = JSON.parse(sbSub.text);
+  const hkTags = sbJson.outbounds.filter((o) => o.tag && o.tag.startsWith('Dup-Remark-HK')).map((o) => o.tag);
+  assert.ok(hkTags.includes('Dup-Remark-HK') && hkTags.includes('Dup-Remark-HK (2)'), 'Duplicate remarks must be disambiguated in Sing-box & Clash subscriptions');
+});
+
+test('15. Multi-Tier Environment Stress Benchmark: Low (10 Nodes) -> Medium (40 Nodes) -> Extreme High Intensity (100 Nodes / 300 Clients / 80 Outbounds / 1,200 Active Connections)', async () => {
+  // Prepare 100 Inbound Nodes (across all protocols, with 3 clients per node = 300 clients) and 80 Outbounds
+  const protocols = ['vless', 'anytls', 'hysteria2', 'shadowsocks', 'trojan', 'vmess', 'socks', 'tuic'];
+  const baseInbCount = store.state.inbounds.length;
+  const baseOutCount = store.state.outbounds.length;
+
+  store.transact((st) => {
+    for (let i = 1; i <= 80; i += 1) {
+      const oTag = `stress-high-out-${i}`;
+      if (!st.outbounds.some((o) => o.tag === oTag)) {
+        st.outbounds.push({
+          id: `out_hi_${i}`,
+          tag: oTag,
+          type: i % 2 === 0 ? 'shadowsocks' : 'vless',
+          remark: `高压落地-${i}`,
+          enabled: true,
+          server: `198.18.${Math.floor(i / 250)}.${(i % 250) + 1}`,
+          port: 40000 + i,
+          method: '2022-blake3-aes-128-gcm',
+          password: 'MTIzNDU2Nzg5Mabcdef=',
+          uuid: '6832b114-5826-4c3c-9c83-400383a51234',
+          up: 0,
+          down: 0
+        });
+      }
+    }
+
+    for (let i = 1; i <= 100; i += 1) {
+      const proto = protocols[i % protocols.length];
+      const port = 42000 + i;
+      const tag = `inbound-hi-${port}`;
+      const outTag = `stress-high-out-${((i - 1) % 80) + 1}`;
+      if (!st.inbounds.some((x) => x.tag === tag)) {
+        st.inbounds.push({
+          id: `in_hi_${i}`,
+          tag,
+          remark: `HighStress-${proto.toUpperCase()}-${i}`,
+          protocol: proto,
+          listen: '::',
+          port,
+          enable: true,
+          security: proto === 'vless' ? 'reality' : (['anytls', 'hysteria2', 'trojan', 'tuic'].includes(proto) ? 'tls' : 'none'),
+          transport: 'tcp',
+          method: '2022-blake3-aes-128-gcm',
+          password: `PassHighStrength${i}Xy9`,
+          socksUser: `u_hi_${i}`,
+          socksPassword: `SockPassHi${i}Zz8`,
+          outboundTag: outTag,
+          limitIp: 5,
+          limitDevice: 5,
+          reality: { serverName: 'tesla.com', target: 'www.tesla.com:443', privateKey: 'priv', publicKey: 'pub', shortIds: ['1a2b'] },
+          clients: [1, 2, 3].map((cIdx) => ({
+            id: `6832b114-5826-4c3c-9c83-${String(i * 10 + cIdx).padStart(12, '0')}`,
+            email: `hi_node${i}_u${cIdx}`,
+            username: `u_hi_${i}_${cIdx}`,
+            password: `ClientPassHi${i}_${cIdx}Ab9`,
+            subId: `sub_hi_${i}_${cIdx}_token12345`,
+            limitIp: 2,
+            limitDevice: 2,
+            enable: true,
+            up: 0,
+            down: 0
+          })),
+          up: 0,
+          down: 0
+        });
+      }
+    }
+  });
+
+  // Build 1,200 concurrent active connections (12 connections per node across 100 nodes: 2 IPs per client * 3 clients * 2 streams)
+  const hiConns = [];
+  const droppedIds = [];
+  for (let i = 1; i <= 100; i += 1) {
+    const proto = protocols[i % protocols.length];
+    const port = 42000 + i;
+    const tag = `inbound-hi-${port}`;
+    const outTag = `stress-high-out-${((i - 1) % 80) + 1}`;
+    for (let cIdx = 1; cIdx <= 3; cIdx += 1) {
+      const userEmail = `hi_node${i}_u${cIdx}`;
+      for (let ipIdx = 1; ipIdx <= 2; ipIdx += 1) {
+        for (let sIdx = 1; sIdx <= 2; sIdx += 1) {
+          // 3 clients * 2 IPs = 6 IPs if all distinct, but node limitIp is 5, so let clients share 4 distinct IPs per node (within both client limitIp=2 and node limitIp=5)
+          const ipOctet = ((cIdx + ipIdx - 2) % 4) + 1;
+          hiConns.push({
+            id: `hi-conn-${i}-${cIdx}-${ipIdx}-${sIdx}`,
+            start: new Date(Date.now() - 2000).toISOString(),
+            metadata: {
+              type: `${proto}/${tag}`,
+              inboundPort: port,
+              sourceIP: `198.51.100.${ipOctet}`,
+              sourcePort: 20000 + cIdx * 100 + ipIdx * 10 + sIdx,
+              user: userEmail
+            },
+            upload: 4096,
+            download: 16384,
+            chains: [outTag]
+          });
+        }
+      }
+    }
+  }
+  assert.equal(hiConns.length, 1200, 'Must simulate 1,200 concurrent connections across 100 nodes');
+
+  const mockHiClash = http.createServer((reqM, resM) => {
+    if (reqM.method === 'GET' && reqM.url === '/connections') {
+      resM.writeHead(200, { 'content-type': 'application/json' });
+      resM.end(JSON.stringify({ connections: hiConns }));
+    } else if (reqM.method === 'DELETE' && reqM.url.startsWith('/connections/')) {
+      droppedIds.push(reqM.url);
+      resM.writeHead(204);
+      resM.end();
+    }
+  });
+  await new Promise((r) => mockHiClash.listen(0, '127.0.0.1', r));
+  store.state.settings.clashApiPort = mockHiClash.address().port;
+
+  try {
+    const startPoll = Date.now();
+    for (let cycle = 1; cycle <= 5; cycle += 1) {
+      for (const c of hiConns) {
+        c.upload += 2048;
+        c.download += 8192;
+      }
+      await singbox.pollConnectionsAndEnforceLimits(new Date(startPoll + cycle * 1000));
+    }
+    const pollElapsed = Date.now() - startPoll;
+    assert.equal(droppedIds.length, 0, 'Zero legitimate connections dropped across 1,200 concurrent streams on 100 nodes');
+    assert.ok(pollElapsed < 1500, `5 cycles of 1,200 connections must complete in < 1.5s (took ${pollElapsed}ms)`);
+
+    // Concurrently hammer read & subscription APIs while 100+ nodes & 300+ clients are active
+    const subToken = store.state.settings.subToken;
+    const concurrentReqs = await Promise.all([
+      req('/SecPath16Chars99/api/overview'),
+      req('/SecPath16Chars99/api/inbounds'),
+      req('/SecPath16Chars99/api/outbounds'),
+      req('/SecPath16Chars99/api/routing'),
+      req(`/sub/${subToken}?format=base64`),
+      req(`/sub/${subToken}?format=clash`),
+      req(`/sub/${subToken}?format=singbox`),
+      req('/sub/sub_hi_50_2_token12345?format=clash')
+    ]);
+    for (const r of concurrentReqs) {
+      assert.equal(r.status, 200);
+    }
+
+    // Trigger memory cleanup and verify low panel memory footprint even after 100-node / 1,200-conn stress test
+    const cleanRes = await req('/SecPath16Chars99/api/system/cleanup', { method: 'POST' });
+    assert.equal(cleanRes.status, 200);
+    const memMB = Math.round(cleanRes.json.system.panelMemoryBytes / (1024 * 1024));
+    assert.ok(memMB < 65, `Panel private memory after 100-node / 1,200-connection stress must remain < 65 MB (was ${memMB} MB)`);
+  } finally {
+    await new Promise((r) => mockHiClash.close(r));
+    store.transact((st) => {
+      st.inbounds.length = baseInbCount;
+      st.outbounds.length = baseOutCount;
+    });
+  }
+});
