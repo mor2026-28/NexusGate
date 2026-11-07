@@ -364,3 +364,33 @@ dialog::backdrop{background:rgba(15,22,36,.52);backdrop-filter:blur(3px)}
   padding: 7px 10px;
   border-top: 1px solid var(--line);
 }
+
+.quick-relay-grid {
+  grid-template-columns: 1fr 1fr auto;
+  align-items: end;
+}
+.rule-inbound-checks {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-soft);
+  max-height: 150px;
+  overflow: auto;
+}
+@media(max-width:720px){
+  .quick-relay-grid {
+    grid-template-columns: 1fr;
+  }
+  .quick-relay-grid button {
+    width: 100%;
+  }
+  .rule-inbound-checks {
+    grid-template-columns: 1fr;
+  }
+  .client-subbox {
+    padding: 8px 10px 10px 14px;
+  }
+}

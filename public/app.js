@@ -941,11 +941,11 @@ function renderRouting() {
     const srcPort = (r.source_port || []).join(', ');
     const l4 = r.network ? r.network.toUpperCase() : '';
     const proto = (r.protocol || []).join(', ');
-    const dstIp = [
+    const dstIp = [...new Set([
       ...(r.ip_is_private ? ['geoip:private'] : []),
       ...(r.ip_cidr || []),
       ...(r.rule_set || []).filter((x) => x.startsWith('geoip-'))
-    ].join(', ');
+    ])].join(', ');
     const dstDomain = [
       ...(r.domain || []),
       ...(r.domain_suffix || []),
@@ -1015,7 +1015,7 @@ function renderRouting() {
         </div>
       </div>
       <div class="panel-body">
-        <div class="form-grid" style="grid-template-columns:1fr 1fr auto;align-items:end">
+        <div class="form-grid quick-relay-grid">
           <label>
             选择入站标签 (Inbound Tag)
             <select id="quick-relay-inbound">
@@ -2629,7 +2629,7 @@ function openRuleModal(existing = null) {
     <form id="rule-form" class="form-grid" data-id="${esc(existing?.id || '')}">
       <label class="wide">
         选择要转发的入站标签 (Inbound Tags · 可多选)
-        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--surface-soft);max-height:140px;overflow:auto">
+        <div class="rule-inbound-checks">
           ${inboundChecks || '<span class="muted">当前尚无入站节点，也可以在下方手动输入入站 Tag</span>'}
         </div>
         <input name="inbound" value="${esc((r.inbound || []).join(', '))}" placeholder="或手动输入入站标签，逗号分隔" style="margin-top:4px">
