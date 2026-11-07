@@ -1724,6 +1724,56 @@ test('18. Real X-Panel Backup (ppfppf 3xui_backup.tar.gz) Migration: Strict Exac
   assert.equal(updateRuleRes.status, 200);
   const updatedRule = updateRuleRes.json.rules.find((r) => r.id === createRuleRes.json.rule.id);
   assert.equal(updatedRule.remark, '入站转发: inbound-19915 ➔ 66yun02-216.167.32.217', 'Editing rule outbound must auto-update remark to new outbound name');
+
+  // 4) Verify 233boy SIP002 ss:// URI parsing (with =, ==, %3D, %3D%3D, %2F) never corrupts password with \r\ufffd\ufffd or trailing 7
+  const ss233Uri1 = `ss://${Buffer.from('aes-128-gcm:233boy.com').toString('base64')}@216.167.32.217:36158#233boy-ss-216.167.32.217`;
+  const parsed233_1 = parseShareUriToOutbound(ss233Uri1);
+  assert.equal(parsed233_1.method, 'aes-128-gcm');
+  assert.equal(parsed233_1.password, '233boy.com', 'SIP002 ss:// with == padding must not append \\r\\ufffd\\ufffd to password');
+  assert.equal(parsed233_1.server, '216.167.32.217');
+  assert.equal(parsed233_1.port, 36158);
+
+  const ss233Uri2 = `ss://${Buffer.from('chacha20-ietf-poly1305:6832b114-5826-4c3c-9c83-400383a51234').toString('base64').replace(/=/g, '%3D')}@216.167.32.217:36158#233boy-ss-216.167.32.217`;
+  const parsed233_2 = parseShareUriToOutbound(ss233Uri2);
+  assert.equal(parsed233_2.method, 'chacha20-ietf-poly1305');
+  assert.equal(parsed233_2.password, '6832b114-5826-4c3c-9c83-400383a51234', 'SIP002 ss:// with %3D padding must not append trailing 7 to UUID password');
+
+  // 5) Verify Store.load() automatically heals existing corrupted outbounds (233boy-ss-216.167.32.217 and 66yun02-216.167.32.217)
+  const ssHealDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-ss-heal-'));
+  try {
+    const ssHealFile = path.join(ssHealDir, 'nexusgate.json');
+    fs.writeFileSync(ssHealFile, JSON.stringify({
+      version: 5.0,
+      admin: { id: 'admin_1', username: 'ng_ssHeal1', passwordHash: 'scrypt:aa:bb' },
+      settings: { webPort: 48842, webBasePath: '/ezSlybeW43YKMzK2/', strictBasePath: true, subToken: 'subToken123456789012' },
+      inbounds: [],
+      outbounds: [
+        { id: 'out_direct', tag: 'direct', type: 'direct', builtin: true, enabled: true },
+        { id: 'out_block', tag: 'block', type: 'block', builtin: true, enabled: true },
+        { id: 'out_9', tag: '66yun02-216.167.32.217', remark: '233boy-ss-216.167.32.217', type: 'shadowsocks', server: '216.167.32.217', port: 36158, method: '2022-blake3-aes-128-gcm', password: '', enabled: true },
+        { id: 'out_10', tag: '233boy-ss-216.167.32.217', remark: '233boy-ss-216.167.32.217', type: 'shadowsocks', server: '216.167.32.217', port: 36158, method: 'aes-128-gcm', password: '233boy.com\r\ufffd\ufffd', enabled: true }
+      ]
+    }));
+    const ssHealedStore = new Store(ssHealFile);
+    const o10 = ssHealedStore.state.outbounds.find((o) => o.tag === '233boy-ss-216.167.32.217');
+    assert.equal(o10.password, '233boy.com', 'Store.load() must strip \\r\\ufffd\\ufffd from %3D%3D-corrupted SS password');
+    assert.equal(o10.method, 'aes-128-gcm');
+    const o9 = ssHealedStore.state.outbounds.find((o) => o.tag === '66yun02-216.167.32.217');
+    assert.equal(o9.password, '233boy.com', 'Store.load() must restore wiped password on 66yun02-216.167.32.217 from sibling outbound');
+    assert.equal(o9.method, 'aes-128-gcm', 'Store.load() must restore aes-128-gcm method on 66yun02-216.167.32.217');
+  } finally {
+    fs.rmSync(ssHealDir, { recursive: true, force: true });
+  }
+
+  // 6) Verify GET /api/routing returns full outbounds (with password & method) so editing an outbound after visiting #routing never loses credentials
+  const getRoutingRes = await req('/SecPath16Chars99/api/routing');
+  assert.equal(getRoutingRes.status, 200);
+  const fullOutbounds = getRoutingRes.json.outbounds || [];
+  const customOutInRouting = fullOutbounds.find((o) => !o.builtin && o.type === 'shadowsocks');
+  if (customOutInRouting) {
+    assert.ok(customOutInRouting.method, 'GET /api/routing must include outbound.method');
+    assert.ok(customOutInRouting.password !== undefined, 'GET /api/routing must include outbound.password');
+  }
 });
 
 test('19. Long-Duration 30-Day (720-Hour) Continuous Operation Simulation: Memory Leak Guard, Disk Footprint, Monthly Reset & CPU Benchmark', async () => {

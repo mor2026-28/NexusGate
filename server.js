@@ -24,6 +24,7 @@ const {
   OUTBOUND_PROTOCOLS,
   ensureUuid,
   normalizeSsMethod,
+  sanitizeSsOutboundPasswordAndMethod,
   ensureSsPassword,
   isCertFileSelfSigned,
   generateRealityKeypair,
@@ -838,14 +839,21 @@ function normalizeOutboundPayload(body, existing = null) {
     remark,
     builtin: Boolean(existing?.builtin),
     enabled: body.enabled !== undefined ? Boolean(body.enabled) : (existing ? existing.enabled !== false : true),
-    server: String(rawObj?.server ?? body.server ?? existing?.server ?? '').trim(),
-    port: Number(rawObj?.server_port ?? body.port ?? existing?.port ?? 443),
+    server: String(rawObj?.server || body.server || existing?.server || '').trim(),
+    port: Number(rawObj?.server_port || body.port || existing?.port || 443),
     detour: String(rawObj?.detour ?? body.detour ?? existing?.detour ?? '').trim(),
-    security: String(body.security ?? existing?.security ?? (['anytls', 'hysteria2', 'tuic'].includes(type) ? 'tls' : 'none')).toLowerCase(),
-    transport: String(body.transport ?? existing?.transport ?? 'tcp').toLowerCase(),
+    security: String(body.security || existing?.security || (['anytls', 'hysteria2', 'tuic'].includes(type) ? 'tls' : 'none')).toLowerCase(),
+    transport: String(body.transport || existing?.transport || 'tcp').toLowerCase(),
     uuid: body.uuid || existing?.uuid ? ensureUuid(body.uuid || existing?.uuid) : '',
-    password: String(rawObj?.password ?? body.password ?? existing?.password ?? '').trim(),
-    method: normalizeSsMethod(rawObj?.method ?? body.method ?? existing?.method ?? '2022-blake3-aes-128-gcm'),
+    ...(type === 'shadowsocks'
+      ? sanitizeSsOutboundPasswordAndMethod(
+          rawObj?.method || body.method || existing?.method || 'aes-128-gcm',
+          rawObj?.password || body.password || existing?.password || ''
+        )
+      : {
+          password: String(rawObj?.password || body.password || existing?.password || '').trim(),
+          method: normalizeSsMethod(rawObj?.method || body.method || existing?.method || 'aes-128-gcm')
+        }),
     uot: Boolean(body.uot ?? existing?.uot ?? false),
     username: String(rawObj?.username ?? body.username ?? existing?.username ?? '').trim(),
     flow: String(rawObj?.flow ?? body.flow ?? existing?.flow ?? '').trim(),
@@ -1618,7 +1626,7 @@ async function handleRequest(req, res) {
         routing: store.state.routing,
         dns: store.state.dns,
         inbounds: store.state.inbounds.map((i) => ({ id: i.id, tag: i.tag, remark: i.remark, port: i.port, protocol: i.protocol, outboundTag: i.outboundTag })),
-        outbounds: store.state.outbounds.map((o) => ({ id: o.id, tag: o.tag, remark: o.remark, type: o.type, server: o.server, port: o.port }))
+        outbounds: (store.state.outbounds || []).map((o) => ({ ...o, singboxPreview: toSingboxOutbound(o) }))
       });
     }
 

@@ -349,7 +349,7 @@ async function load(page = state.page, options = {}) {
           });
         }
       }
-      if (Array.isArray(data.outbounds) && !state.outbounds.length) state.outbounds = data.outbounds;
+      if (Array.isArray(data.outbounds)) state.outbounds = data.outbounds;
     } else if (page === 'outbounds') {
       const data = await api('/api/outbounds');
       if (page !== state.page || seq !== currentLoadSeq) return;
@@ -2447,7 +2447,7 @@ function openOutboundModal(existing = null) {
     type: 'shadowsocks',
     server: '',
     port: 8388,
-    method: '2022-blake3-aes-128-gcm',
+    method: 'aes-128-gcm',
     password: '',
     uuid: '',
     username: '',
