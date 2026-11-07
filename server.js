@@ -243,6 +243,20 @@ if (process.argv.length > 2 && process.argv[2].startsWith('--')) {
   process.exit(0);
 }
 
+function isAutoRuleRemark(remark) {
+  const s = String(remark || '').trim();
+  return !s || /^入站转发\s*[:：]/.test(s) || /^分流规则(\s*#\d+)?(\s*\([^)]*\))?$/.test(s);
+}
+
+function buildAutoRuleRemark(inboundList, outboundTag) {
+  const inbs = (Array.isArray(inboundList) ? inboundList : String(inboundList || '').split(',')).map((s) => s.trim()).filter(Boolean);
+  const out = String(outboundTag || 'direct').trim();
+  if (inbs.length > 0) {
+    return `入站转发: ${inbs.join(', ')} ➔ ${out}`;
+  }
+  return `分流规则 (${out})`;
+}
+
 function syncInboundRelayToRoutingRule(st, inbound) {
   if (!st.routing) st.routing = { final: 'direct', rules: [] };
   if (!Array.isArray(st.routing.rules)) st.routing.rules = [];
@@ -253,9 +267,10 @@ function syncInboundRelayToRoutingRule(st, inbound) {
   );
 
   if (inbound.outboundTag && inbound.outboundTag !== 'default') {
+    const prevRemark = existingIdx >= 0 ? st.routing.rules[existingIdx].remark : '';
     const relayRule = {
       id: existingIdx >= 0 ? st.routing.rules[existingIdx].id : `rule_relay_${crypto.randomBytes(4).toString('hex')}`,
-      remark: `入站转发: ${inbound.remark} (${inbound.tag}) ➔ ${inbound.outboundTag}`,
+      remark: isAutoRuleRemark(prevRemark) ? buildAutoRuleRemark([inbound.tag], inbound.outboundTag) : prevRemark,
       enabled: true,
       action: 'route',
       inbound: [inbound.tag],
@@ -558,7 +573,8 @@ function normalizeInboundPayload(body, existing = null) {
     throw err;
   }
 
-  const tag = String(body.tag || existing?.tag || `inbound-${port}`).trim();
+  const isDefaultPortTag = existing && existing.tag === `inbound-${existing.port}` && (!body.tag || body.tag === existing.tag);
+  const tag = String(isDefaultPortTag ? `inbound-${port}` : (body.tag || existing?.tag || `inbound-${port}`)).trim();
   const remark = String(body.remark || existing?.remark || `${protocol.toUpperCase()}-${port}`).trim();
   const listen = String(body.listen || existing?.listen || '::').trim();
   const publicHost = String(body.publicHost ?? existing?.publicHost ?? '').trim();
@@ -1238,9 +1254,20 @@ async function handleRequest(req, res) {
       if (portConflict) {
         return sendError(res, 400, `端口 ${updated.port} 已被入站 [${portConflict.remark}] 占用`);
       }
+      const oldInbTag = existing.tag;
       store.transact((st) => {
         const idx = st.inbounds.findIndex((x) => x.id === existing.id);
         st.inbounds[idx] = updated;
+        if (oldInbTag !== updated.tag) {
+          for (const r of st.routing.rules || []) {
+            if (Array.isArray(r.inbound) && r.inbound.includes(oldInbTag)) {
+              r.inbound = r.inbound.map((t) => (t === oldInbTag ? updated.tag : t));
+              if (isAutoRuleRemark(r.remark)) {
+                r.remark = buildAutoRuleRemark(r.inbound, r.outbound);
+              }
+            }
+          }
+        }
         syncInboundRelayToRoutingRule(st, updated);
         store.addAudit(session.username, 'update_inbound', `${updated.remark} (${updated.protocol}:${updated.port})`);
       });
@@ -1555,7 +1582,12 @@ async function handleRequest(req, res) {
             if (inb.outboundTag === oldTag) inb.outboundTag = updated.tag;
           }
           for (const r of st.routing.rules || []) {
-            if (r.outbound === oldTag) r.outbound = updated.tag;
+            if (r.outbound === oldTag) {
+              r.outbound = updated.tag;
+              if (isAutoRuleRemark(r.remark)) {
+                r.remark = buildAutoRuleRemark(r.inbound, updated.tag);
+              }
+            }
           }
         }
         store.addAudit(session.username, 'update_outbound', `${updated.remark} (${updated.tag})`);
@@ -1604,12 +1636,15 @@ async function handleRequest(req, res) {
     if (pathname === '/api/routing/rules' && method === 'POST') {
       const body = await readJson(req);
       const splitList = (v) => (Array.isArray(v) ? v : String(v || '').split(',').map((s) => s.trim()).filter(Boolean));
+      const parsedInbounds = splitList(body.inbound);
+      const parsedOutbound = String(body.outbound || 'direct').trim();
+      const rawPostRemark = String(body.remark || '').trim();
       const newRule = {
         id: `rule_${crypto.randomBytes(5).toString('hex')}`,
-        remark: String(body.remark || (body.inbound ? `入站转发: ${body.inbound} ➔ ${body.outbound}` : '分流规则')).trim(),
+        remark: isAutoRuleRemark(rawPostRemark) ? buildAutoRuleRemark(parsedInbounds, parsedOutbound) : rawPostRemark,
         enabled: body.enabled !== false,
         action: body.action || 'route',
-        inbound: splitList(body.inbound),
+        inbound: parsedInbounds,
         user: splitList(body.user),
         domain: splitList(body.domain),
         domain_suffix: splitList(body.domain_suffix),
@@ -1661,11 +1696,17 @@ async function handleRequest(req, res) {
       if (!existing) return sendError(res, 404, '未找到该分流规则');
       store.transact((st) => {
         const idx = st.routing.rules.findIndex((r) => r.id === ruleMatch.id);
+        const nextInbound = body.inbound !== undefined ? splitList(body.inbound) : existing.inbound;
+        const nextOutbound = body.outbound !== undefined ? String(body.outbound).trim() : existing.outbound;
+        const rawPutRemark = body.remark !== undefined ? String(body.remark).trim() : existing.remark;
+        const nextRemark = isAutoRuleRemark(rawPutRemark)
+          ? buildAutoRuleRemark(nextInbound, nextOutbound)
+          : rawPutRemark;
         st.routing.rules[idx] = {
           ...existing,
-          remark: body.remark !== undefined ? String(body.remark).trim() : existing.remark,
+          remark: nextRemark,
           enabled: body.enabled !== undefined ? Boolean(body.enabled) : existing.enabled,
-          inbound: body.inbound !== undefined ? splitList(body.inbound) : existing.inbound,
+          inbound: nextInbound,
           user: body.user !== undefined ? splitList(body.user) : (existing.user || []),
           domain: body.domain !== undefined ? splitList(body.domain) : existing.domain,
           domain_suffix: body.domain_suffix !== undefined ? splitList(body.domain_suffix) : existing.domain_suffix,

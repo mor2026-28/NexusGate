@@ -1601,6 +1601,22 @@ test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 
   sandbox.openRuleModal();
   assert.equal(elementsById.get('modal').open, true);
   sandbox.closeModal();
+
+  // Verify frontend auto-remark helpers & live modal remark sync when editing a routing rule
+  assert.equal(sandbox.isAutoRuleRemark('入站转发: inbound-19915 ➔ ppf19.9'), true);
+  assert.equal(sandbox.isAutoRuleRemark('自定义专线备注'), false);
+  assert.equal(sandbox.buildAutoRuleRemark(['inbound-19915'], '66yun02-216.167.32.217'), '入站转发: inbound-19915 ➔ 66yun02-216.167.32.217');
+
+  // Even if an existing rule in memory had a stale remark, opening openRuleModal(existing) immediately normalizes it
+  sandbox.openRuleModal({
+    id: 'r_stale_19915',
+    remark: '入站转发: inbound-19915 ➔ ppf19.9',
+    inbound: ['inbound-19915'],
+    outbound: '66yun02-216.167.32.217'
+  });
+  assert.equal(elementsById.get('modal-title').textContent, '入站转发: inbound-19915 ➔ 66yun02-216.167.32.217');
+  assert.ok(elementsById.get('modal-body').innerHTML.includes('value="入站转发: inbound-19915 ➔ 66yun02-216.167.32.217"'));
+  sandbox.closeModal();
 });
 
 test('18. Real X-Panel Backup (ppfppf 3xui_backup.tar.gz) Migration: Strict Exact Inbound Tag Matching (Zero Fuzzy Cross-Binding), device_limit Column & Deduplication', async () => {
@@ -1665,7 +1681,7 @@ test('18. Real X-Panel Backup (ppfppf 3xui_backup.tar.gz) Migration: Strict Exac
         final: 'direct',
         rules: [
           { id: 'r_sniff', action: 'sniff', enabled: true },
-          { id: 'r_50', remark: '入站转发: inbound-41450 ➔ rakNTT50', enabled: true, action: 'route', inbound: ['inbound-41450'], outbound: 'rakNTT50' },
+          { id: 'r_50', remark: '入站转发: inbound-41450 ➔ ppf19.9', enabled: true, action: 'route', inbound: ['inbound-41450'], outbound: '66yun02-216.167.32.217' },
           { id: 'r_priv1', remark: '分流规则 #5 (block)', enabled: true, action: 'route', ip_is_private: true, ip_cidr: ['geoip:private'], outbound: 'block' },
           { id: 'r_priv2', remark: '阻止私有内网探测 (geoip:private)', enabled: true, action: 'route', ip_is_private: true, ip_cidr: [], outbound: 'block' }
         ]
@@ -1675,12 +1691,39 @@ test('18. Real X-Panel Backup (ppfppf 3xui_backup.tar.gz) Migration: Strict Exac
     const strictStore = new Store(healFile);
     const strictRak52 = strictStore.state.inbounds.find((i) => i.tag === 'inbound-53255');
     assert.equal(strictRak52.outboundTag, 'default', 'Store.load() must never auto-bind unbound inbounds by fuzzy similarity');
+    const repairedRule = strictStore.state.routing.rules.find((r) => r.id === 'r_50');
+    assert.equal(repairedRule.remark, '入站转发: inbound-41450 ➔ 66yun02-216.167.32.217', 'Store.load() must auto-update stale relay rule remarks to match current outbound');
     const privRules = strictStore.state.routing.rules.filter((r) => r.ip_is_private && r.outbound === 'block');
     assert.equal(privRules.length, 1, 'Store.load() must deduplicate duplicate private IP block rules');
     assert.deepEqual(privRules[0].ip_cidr, []);
   } finally {
     fs.rmSync(healDir, { recursive: true, force: true });
   }
+
+  // 3) Verify PUT /api/routing/rules/:id automatically updates remark when outbound or inbound changes, even if old auto-remark is sent
+  const createRuleRes = await req('/SecPath16Chars99/api/routing/rules', {
+    method: 'POST',
+    body: JSON.stringify({
+      inbound: ['inbound-19915'],
+      outbound: 'ppf19.9',
+      remark: ''
+    })
+  });
+  assert.equal(createRuleRes.status, 201);
+  assert.equal(createRuleRes.json.rule.remark, '入站转发: inbound-19915 ➔ ppf19.9');
+
+  // Now simulate editing the rule and changing outbound to 66yun02-216.167.32.217 while passing the old remark
+  const updateRuleRes = await req(`/SecPath16Chars99/api/routing/rules/${createRuleRes.json.rule.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      inbound: 'inbound-19915',
+      outbound: '66yun02-216.167.32.217',
+      remark: '入站转发: inbound-19915 ➔ ppf19.9'
+    })
+  });
+  assert.equal(updateRuleRes.status, 200);
+  const updatedRule = updateRuleRes.json.rules.find((r) => r.id === createRuleRes.json.rule.id);
+  assert.equal(updatedRule.remark, '入站转发: inbound-19915 ➔ 66yun02-216.167.32.217', 'Editing rule outbound must auto-update remark to new outbound name');
 });
 
 test('19. Long-Duration 30-Day (720-Hour) Continuous Operation Simulation: Memory Leak Guard, Disk Footprint, Monthly Reset & CPU Benchmark', async () => {

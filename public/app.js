@@ -2592,10 +2592,43 @@ function openOutboundModal(existing = null) {
     </div>
     `
   );
+
+  const outTagInput = $('#out-f-tag');
+  const outRemInput = $('#out-f-remark');
+  if (outTagInput && outRemInput) {
+    let lastAutoOutTag = outTagInput.value.trim();
+    outTagInput.addEventListener('input', () => {
+      const curRem = outRemInput.value.trim();
+      if (!curRem || curRem === lastAutoOutTag) {
+        outRemInput.value = outTagInput.value.trim();
+      }
+      lastAutoOutTag = outTagInput.value.trim();
+    });
+  }
+}
+
+function isAutoRuleRemark(remark) {
+  const s = String(remark || '').trim();
+  return !s || /^入站转发\s*[:：]/.test(s) || /^分流规则(\s*#\d+)?(\s*\([^)]*\))?$/.test(s);
+}
+
+function buildAutoRuleRemark(inboundRaw, outboundTag) {
+  const inbs = (Array.isArray(inboundRaw) ? inboundRaw : String(inboundRaw || '').split(',')).map((s) => s.trim()).filter(Boolean);
+  const out = String(outboundTag || 'direct').trim();
+  if (inbs.length > 0) {
+    return `入站转发: ${inbs.join(', ')} ➔ ${out}`;
+  }
+  return `分流规则 (${out})`;
 }
 
 function openRuleModal(existing = null) {
-  const r = existing || {
+  const defaultOut = state.outbounds.find((o) => !o.builtin)?.tag || 'direct';
+  const r = existing ? {
+    ...existing,
+    remark: isAutoRuleRemark(existing.remark)
+      ? buildAutoRuleRemark(existing.inbound, existing.outbound || defaultOut)
+      : existing.remark
+  } : {
     remark: '',
     inbound: [],
     user: [],
@@ -2610,7 +2643,7 @@ function openRuleModal(existing = null) {
     network: '',
     rule_set: [],
     ip_is_private: false,
-    outbound: state.outbounds.find((o) => !o.builtin)?.tag || 'direct'
+    outbound: defaultOut
   };
 
   const outboundOpts = state.outbounds
@@ -2698,12 +2731,52 @@ function openRuleModal(existing = null) {
     `
   );
 
-  $$('input[name="inbound_check"]', $('#rule-form')).forEach((cb) => {
+  const ruleForm = $('#rule-form');
+  const inboundInput = $('input[name="inbound"]', ruleForm);
+  const outboundSelect = $('select[name="outbound"]', ruleForm);
+  const remarkInput = $('input[name="remark"]', ruleForm);
+  if (remarkInput) {
+    remarkInput.dataset.customRemark = (existing && !isAutoRuleRemark(existing.remark)) ? '1' : '';
+    remarkInput.addEventListener('input', () => {
+      remarkInput.dataset.customRemark = isAutoRuleRemark(remarkInput.value) ? '' : '1';
+    });
+  }
+
+  const syncRuleRemarkLive = () => {
+    if (!remarkInput || remarkInput.dataset.customRemark === '1') return;
+    const curInb = inboundInput ? inboundInput.value : '';
+    const curOut = outboundSelect ? outboundSelect.value : 'direct';
+    const hasInb = curInb.split(',').map((s) => s.trim()).filter(Boolean).length > 0;
+    if (existing || hasInb || remarkInput.value.trim()) {
+      const nextRem = buildAutoRuleRemark(curInb, curOut);
+      remarkInput.value = nextRem;
+      if (existing && $('#modal-title')) {
+        $('#modal-title').textContent = nextRem;
+      }
+    }
+  };
+
+  $$('input[name="inbound_check"]', ruleForm).forEach((cb) => {
     cb.addEventListener('change', () => {
-      const checkedVals = $$('input[name="inbound_check"]:checked', $('#rule-form')).map((x) => x.value);
-      $('input[name="inbound"]', $('#rule-form')).value = checkedVals.join(', ');
+      const checkedVals = $$('input[name="inbound_check"]:checked', ruleForm).map((x) => x.value);
+      if (inboundInput) inboundInput.value = checkedVals.join(', ');
+      syncRuleRemarkLive();
     });
   });
+
+  if (inboundInput) {
+    inboundInput.addEventListener('input', () => {
+      const typedSet = new Set(inboundInput.value.split(',').map((s) => s.trim()).filter(Boolean));
+      $$('input[name="inbound_check"]', ruleForm).forEach((cb) => {
+        cb.checked = typedSet.has(cb.value);
+      });
+      syncRuleRemarkLive();
+    });
+  }
+
+  if (outboundSelect) {
+    outboundSelect.addEventListener('change', syncRuleRemarkLive);
+  }
 }
 
 /* ==================== EVENT DELEGATION ==================== */
