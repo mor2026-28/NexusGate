@@ -1603,43 +1603,53 @@ test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 
   sandbox.closeModal();
 });
 
-test('18. Real X-Panel Backup (ppfppf 3xui_backup.tar.gz) Migration: Smart Inbound Tag Healing (inbound-53252 -> inbound-53255 -> rakNTT52), device_limit Column & Self-Healing', async () => {
-  const { parse3xuiPayload, apply3xuiMigration } = require('../lib/migrate3xui');
+test('18. Real X-Panel Backup (ppfppf 3xui_backup.tar.gz) Migration: Strict Exact Inbound Tag Matching (Zero Fuzzy Cross-Binding), device_limit Column & Deduplication', async () => {
+  const { parse3xuiPayload } = require('../lib/migrate3xui');
   const { Store } = require('../lib/store');
 
-  // 1) Test against the user-uploaded real backup archive if present, PLUS a synthetic replica so the test is 100% self-contained
+  // 1) Verify against the real backup archive if present
   const realBackupPath = '/working_dir/c_705d4f468dc5a47a/user_uploaded_files/ttl=63d/user_uploaded/ppfppf 3xui_backup.tar.gz';
   if (fs.existsSync(realBackupPath)) {
     const realParsed = parse3xuiPayload({ dbPath: realBackupPath, dryRun: true });
     assert.equal(realParsed.inbounds.length, 6, 'Real backup must parse all 6 inbounds');
+
+    // Exact-matched relay rules (5 inbounds) must bind accurately
+    const bl23 = realParsed.inbounds.find((i) => i.remark === 'US-BL-23');
+    assert.equal(bl23.outboundTag, 'ppf19.9');
+    assert.equal(bl23.limitDevice, 5, 'X-Panel top-level device_limit=5 on US-BL-23 must be preserved');
+
+    const ino = realParsed.inbounds.find((i) => i.remark === 'US-inonenii-11/05');
+    assert.equal(ino.outboundTag, 'ppf19.9');
+    assert.equal(ino.limitIp, 3, 'Client limitIp=3 on US-inonenii-11/05 must be preserved');
+    assert.equal(ino.limitDevice, 5, 'X-Panel top-level device_limit=5 on US-inonenii-11/05 must be preserved');
+
+    const rak50 = realParsed.inbounds.find((i) => i.remark === 'US-rak-50');
+    assert.equal(rak50.outboundTag, 'rakNTT50');
+
+    // Mismatched rule inbound-53252 -> rakNTT52 MUST NOT be fuzzy-bound to US-rak-52 (port 53255 / inbound-53255)
     const rak52 = realParsed.inbounds.find((i) => i.remark === 'US-rak-52');
     assert.ok(rak52, 'US-rak-52 inbound must exist');
     assert.equal(rak52.port, 53255);
     assert.equal(rak52.tag, 'inbound-53255');
-    assert.equal(rak52.outboundTag, 'rakNTT52', 'US-rak-52 (:53255) must automatically heal its relay rule from inbound-53252 -> rakNTT52');
-
-    const bl23 = realParsed.inbounds.find((i) => i.remark === 'US-BL-23');
-    assert.equal(bl23.limitDevice, 5, 'X-Panel top-level device_limit=5 on US-BL-23 must be preserved');
-    const ino = realParsed.inbounds.find((i) => i.remark === 'US-inonenii-11/05');
-    assert.equal(ino.limitIp, 3, 'Client limitIp=3 on US-inonenii-11/05 must be preserved');
-    assert.equal(ino.limitDevice, 5, 'X-Panel top-level device_limit=5 on US-inonenii-11/05 must be preserved');
-
-    const rak52Rule = realParsed.rules.find((r) => r.outbound === 'rakNTT52');
-    assert.ok(rak52Rule, 'Relay rule for rakNTT52 must not be dropped');
-    assert.deepEqual(rak52Rule.inbound, ['inbound-53255']);
+    assert.equal(rak52.outboundTag, 'default', 'Strict matching must NOT fuzzy-bind mismatched inbound-53252 to inbound-53255');
+    assert.ok(
+      Array.isArray(realParsed.summary.skippedDanglingRules) &&
+      realParsed.summary.skippedDanglingRules.some((d) => d.inboundTag === 'inbound-53252' && d.outboundTag === 'rakNTT52'),
+      'Dangling rule inbound-53252 -> rakNTT52 must be recorded in summary.skippedDanglingRules'
+    );
 
     const privRule = realParsed.rules.find((r) => r.ip_is_private);
     assert.ok(privRule);
     assert.deepEqual(privRule.ip_cidr, [], 'geoip:private must not be duplicated in ip_cidr');
   }
 
-  // 2) Also verify Store.load() self-healing on an already-migrated state where US-rak-52 had outboundTag="default"
-  const healDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-heal-'));
+  // 2) Verify Store.load() deduplicates geoip:private rules without ever guessing/fuzzy-binding unbound inbounds
+  const healDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-strict-'));
   try {
     const healFile = path.join(healDir, 'nexusgate.json');
     fs.writeFileSync(healFile, JSON.stringify({
-      version: 3.8,
-      admin: { id: 'admin_1', username: 'ng_healUser1', passwordHash: 'scrypt:aa:bb' },
+      version: 5.0,
+      admin: { id: 'admin_1', username: 'ng_strictUser1', passwordHash: 'scrypt:aa:bb' },
       settings: { webPort: 48842, webBasePath: '/ezSlybeW43YKMzK2/', strictBasePath: true, subToken: 'subToken123456789012' },
       inbounds: [
         { id: 'in_1', remark: 'US-rak-50', port: 41450, tag: 'inbound-41450', protocol: 'vless', outboundTag: 'rakNTT50', migratedFrom3xui: true, clients: [{ id: '6832b114-5826-4c3c-9c83-400383a51234', email: 'u1', subId: 'sub12345678' }] },
@@ -1662,13 +1672,10 @@ test('18. Real X-Panel Backup (ppfppf 3xui_backup.tar.gz) Migration: Smart Inbou
       }
     }));
 
-    const healedStore = new Store(healFile);
-    const healedRak52 = healedStore.state.inbounds.find((i) => i.tag === 'inbound-53255');
-    assert.equal(healedRak52.outboundTag, 'rakNTT52', 'Store.load() must self-heal US-rak-52 -> rakNTT52 on existing servers');
-    const healedRule = healedStore.state.routing.rules.find((r) => r.outbound === 'rakNTT52');
-    assert.ok(healedRule, 'Store.load() must insert the missing routing rule for rakNTT52');
-    assert.deepEqual(healedRule.inbound, ['inbound-53255']);
-    const privRules = healedStore.state.routing.rules.filter((r) => r.ip_is_private && r.outbound === 'block');
+    const strictStore = new Store(healFile);
+    const strictRak52 = strictStore.state.inbounds.find((i) => i.tag === 'inbound-53255');
+    assert.equal(strictRak52.outboundTag, 'default', 'Store.load() must never auto-bind unbound inbounds by fuzzy similarity');
+    const privRules = strictStore.state.routing.rules.filter((r) => r.ip_is_private && r.outbound === 'block');
     assert.equal(privRules.length, 1, 'Store.load() must deduplicate duplicate private IP block rules');
     assert.deepEqual(privRules[0].ip_cidr, []);
   } finally {
