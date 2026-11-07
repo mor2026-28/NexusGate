@@ -1374,3 +1374,231 @@ test('16. Zero-Lag Sidebar Tab Switching Benchmark (< 15ms per tab with 40+ migr
   const totalBenchMs = Date.now() - startBench;
   assert.ok(totalBenchMs < 200, `18 consecutive sidebar tab switches across all 6 pages must complete in < 200ms total (took ${totalBenchMs}ms)`);
 });
+
+test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 Sidebar Tabs, Verify Active State, Title, Content & Modals with Zero Runtime Errors', async () => {
+  const vm = require('node:vm');
+  const appCode = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+
+  // Build a lightweight, standards-compliant simulated DOM matching public/index.html
+  const makeEl = (tag, id = '', attrs = {}) => {
+    const classes = new Set((attrs.className || '').split(/\s+/).filter(Boolean));
+    const el = {
+      tagName: tag.toUpperCase(),
+      id,
+      dataset: { ...(attrs.dataset || {}) },
+      style: {},
+      value: attrs.value || '',
+      checked: Boolean(attrs.checked),
+      disabled: false,
+      textContent: attrs.textContent || '',
+      _innerHTML: '',
+      isConnected: true,
+      open: false,
+      children: [],
+      listeners: {},
+      classList: {
+        add: (...c) => c.forEach((x) => classes.add(x)),
+        remove: (...c) => c.forEach((x) => classes.delete(x)),
+        toggle: (c, force) => {
+          const next = force !== undefined ? Boolean(force) : !classes.has(c);
+          if (next) classes.add(c);
+          else classes.delete(c);
+          return next;
+        },
+        contains: (c) => classes.has(c)
+      },
+      get className() { return [...classes].join(' '); },
+      set className(v) { classes.clear(); String(v || '').split(/\s+/).filter(Boolean).forEach((x) => classes.add(x)); },
+      get innerHTML() { return this._innerHTML; },
+      set innerHTML(v) { this._innerHTML = String(v ?? ''); },
+      setAttribute(k, v) { if (k === 'open') this.open = true; this[k] = v; },
+      removeAttribute(k) { if (k === 'open') { this.open = false; return; } delete this[k]; },
+      showModal() { this.open = true; },
+      close() { this.open = false; },
+      append() {},
+      remove() {},
+      focus() {},
+      select() {},
+      setSelectionRange() {},
+      addEventListener(type, fn) {
+        if (!this.listeners[type]) this.listeners[type] = [];
+        this.listeners[type].push(fn);
+      },
+      querySelector(sel) { return doc.querySelector(sel); },
+      querySelectorAll(sel) { return doc.querySelectorAll(sel); },
+      closest(sel) {
+        if (sel === '#nav button[data-page]' && this.dataset.page) return this;
+        if (sel === '[data-action]' && this.dataset.action) return this;
+        if (sel === '[data-close]' && this.dataset.close !== undefined) return this;
+        return null;
+      },
+      matches: () => false
+    };
+    return el;
+  };
+
+  const navPages = ['overview', 'inbounds', 'routing', 'outbounds', 'migrate', 'certificates', 'settings'];
+  const navButtons = navPages.map((p, i) => makeEl('button', `nav-${p}`, { className: i === 0 ? 'active' : '', dataset: { page: p } }));
+  const elementsById = new Map([
+    ['login', makeEl('div', 'login', { className: 'login-shell hidden' })],
+    ['app', makeEl('div', 'app', { className: 'app-shell hidden' })],
+    ['sidebar', makeEl('aside', 'sidebar')],
+    ['nav', makeEl('nav', 'nav')],
+    ['sb-dot', makeEl('span', 'sb-dot')],
+    ['connection-label', makeEl('span', 'connection-label')],
+    ['logout', makeEl('button', 'logout')],
+    ['menu-toggle', makeEl('button', 'menu-toggle')],
+    ['breadcrumb', makeEl('p', 'breadcrumb')],
+    ['page-title', makeEl('h1', 'page-title')],
+    ['quick-config-btn', makeEl('button', 'quick-config-btn')],
+    ['refresh', makeEl('button', 'refresh')],
+    ['user-chip', makeEl('span', 'user-chip')],
+    ['content', makeEl('div', 'content')],
+    ['sidebar-scrim', makeEl('button', 'sidebar-scrim')],
+    ['modal', makeEl('dialog', 'modal')],
+    ['modal-kicker', makeEl('p', 'modal-kicker')],
+    ['modal-title', makeEl('h2', 'modal-title')],
+    ['modal-body', makeEl('div', 'modal-body')],
+    ['toasts', makeEl('div', 'toasts')],
+    ['login-error', makeEl('p', 'login-error')]
+  ]);
+  const metaTheme = makeEl('meta');
+  const themeBtn = makeEl('button', 'theme-btn');
+
+  const doc = {
+    documentElement: { dataset: { theme: 'light' } },
+    body: makeEl('body'),
+    activeElement: { tagName: 'BODY' },
+    listeners: {},
+    createElement: (tag) => makeEl(tag),
+    execCommand: () => true,
+    addEventListener(type, fn) {
+      if (!this.listeners[type]) this.listeners[type] = [];
+      this.listeners[type].push(fn);
+    },
+    querySelector(sel) {
+      if (sel.startsWith('#') && !sel.includes(' ')) return elementsById.get(sel.slice(1)) || makeEl('input', sel.slice(1));
+      if (sel === 'meta[name="theme-color"]') return metaTheme;
+      return null;
+    },
+    querySelectorAll(sel) {
+      if (sel === '#nav button') return navButtons;
+      if (sel === '[data-theme-toggle]') return [themeBtn];
+      return [];
+    }
+  };
+
+  const storageMap = new Map([['ng-active-page', 'inbounds']]);
+  const storageObj = {
+    getItem: (k) => storageMap.get(k) || null,
+    setItem: (k, v) => storageMap.set(k, String(v)),
+    removeItem: (k) => storageMap.delete(k)
+  };
+
+  const win = {
+    __NG_BASE_PATH__: '/SecPath16Chars99',
+    location: { hash: '#inbounds', protocol: 'https:', hostname: 'ppf.onliveme.com', port: '48842', href: '' },
+    history: { replaceState: (_s, _t, h) => { win.location.hash = h; } },
+    localStorage: storageObj,
+    sessionStorage: storageObj,
+    crypto: require('node:crypto').webcrypto,
+    scrollY: 0,
+    scrollX: 0,
+    scrollTo: (x, y) => { win.scrollX = x; win.scrollY = y; },
+    requestAnimationFrame: (fn) => fn(),
+    addEventListener: () => {},
+    qrcode: () => ({ addData() {}, make() {}, createSvgTag: () => '<svg></svg>' })
+  };
+
+  const sandbox = {
+    window: win,
+    document: doc,
+    localStorage: storageObj,
+    sessionStorage: storageObj,
+    history: win.history,
+    navigator: { clipboard: { writeText: async () => {} } },
+    Intl,
+    URLSearchParams,
+    FormData: class { entries() { return []; } },
+    ArrayBuffer,
+    Uint32Array,
+    Math,
+    Date,
+    Number,
+    String,
+    Boolean,
+    Object,
+    Array,
+    Set,
+    Map,
+    Promise,
+    JSON,
+    encodeURIComponent,
+    decodeURIComponent,
+    confirm: () => true,
+    setTimeout: (fn) => { fn(); return 1; },
+    clearTimeout: () => {},
+    setInterval: () => ({ unref() {} }),
+    clearInterval: () => {},
+    requestAnimationFrame: (fn) => fn(),
+    fetch: async (urlPath, opts = {}) => {
+      const r = await req(urlPath, opts);
+      return {
+        ok: r.status >= 200 && r.status < 300,
+        status: r.status,
+        headers: { get: (h) => r.headers.get(h) },
+        json: async () => r.json,
+        text: async () => r.text
+      };
+    }
+  };
+
+  vm.createContext(sandbox);
+  vm.runInContext(appCode, sandbox);
+
+  // Wait for async boot IIFE to finish
+  await new Promise((r) => setTimeout(r, 80));
+
+  // Verify initial boot on #inbounds succeeded: title is 入站节点管理, active button is inbounds, content is non-empty!
+  assert.equal(elementsById.get('page-title').textContent, '入站节点管理', 'Initial boot on #inbounds must set page title to 入站节点管理');
+  assert.ok(navButtons.find((b) => b.dataset.page === 'inbounds').classList.contains('active'), 'Inbounds sidebar button must be active');
+  assert.ok(!navButtons.find((b) => b.dataset.page === 'overview').classList.contains('active'), 'Overview sidebar button must NOT remain active when on #inbounds');
+  assert.ok(elementsById.get('content').innerHTML.includes('添加入站'), 'Inbounds content must be rendered immediately');
+
+  // Now simulate clicking every single sidebar button via the document click listener and verify instant switching!
+  const expectedTitles = {
+    overview: '系统与内核总览',
+    inbounds: '入站节点管理',
+    routing: '路由规则 (转发)',
+    outbounds: '出站规则 (中转)',
+    migrate: '备份迁移',
+    certificates: 'SSL 证书与订阅',
+    settings: '面板设置与安全'
+  };
+
+  for (const page of navPages) {
+    const btn = navButtons.find((b) => b.dataset.page === page);
+    for (const clickHandler of doc.listeners.click || []) {
+      await clickHandler({ target: btn });
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(elementsById.get('page-title').textContent, expectedTitles[page], `Clicking sidebar [${page}] must update #page-title to ${expectedTitles[page]}`);
+    assert.equal(win.location.hash, `#${page}`, `Clicking sidebar [${page}] must update URL hash to #${page}`);
+    assert.ok(btn.classList.contains('active'), `Sidebar button [${page}] must have .active class`);
+    assert.ok(elementsById.get('content').innerHTML.length > 100, `Content for [${page}] must be non-empty`);
+  }
+
+  // Also test opening Inbound, Outbound, Rule, and Aggregate QR modals in the VM without any runtime errors
+  await sandbox.openInboundModal();
+  assert.equal(elementsById.get('modal').open, true);
+  sandbox.closeModal();
+  assert.equal(elementsById.get('modal').open, false);
+
+  sandbox.openOutboundModal();
+  assert.equal(elementsById.get('modal').open, true);
+  sandbox.closeModal();
+
+  sandbox.openRuleModal();
+  assert.equal(elementsById.get('modal').open, true);
+  sandbox.closeModal();
+});

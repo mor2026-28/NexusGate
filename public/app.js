@@ -401,7 +401,7 @@ function setPage(page) {
   } catch { /* ignore */ }
   currentLoadSeq += 1;
   $('#app').classList.remove('sidebar-open');
-  $('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
+  $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
   const titles = {
     overview: '系统与内核总览',
     inbounds: '入站节点管理',
@@ -416,9 +416,9 @@ function setPage(page) {
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
-    render();
   }
-  load(page);
+  render();
+  load(page, { silent: true });
 }
 
 function getBaseSubscriptionUrl(subToken = '') {

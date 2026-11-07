@@ -85,14 +85,16 @@ autostart_status_text() {
 }
 
 singbox_status_text() {
-  local ver="未安装"
+  local ver=""
   if [[ -x /usr/local/bin/sing-box ]]; then
-    ver="$(/usr/local/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || echo '已安装')"
+    ver="$(/usr/local/bin/sing-box version 2>/dev/null | head -n 1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?' | head -n 1 || true)"
   fi
+  local ver_tag="${ver:+v${ver}}"
+  ver_tag="${ver_tag:-已安装}"
   if systemctl is-active --quiet nexusgate-singbox.service 2>/dev/null || pgrep -f "sing-box run" >/dev/null 2>&1; then
-    echo -e "${green}运行中 (v${ver})${plain}"
+    echo -e "${green}运行中 (${ver_tag})${plain}"
   else
-    echo -e "${yellow}已停止 (${ver})${plain}"
+    echo -e "${yellow}已停止 (${ver:-未安装})${plain}"
   fi
 }
 
@@ -583,7 +585,7 @@ EOF
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
-  ok "NexusGate 面板与管理脚本已更新至 v3.7，所有节点与 Sing-box 内核已重新加载生效！"
+  ok "NexusGate 面板与管理脚本已更新至 v3.8，所有节点与 Sing-box 内核已重新加载生效！"
   show_info
   if [[ -r /dev/tty ]]; then
     pause_return
@@ -608,7 +610,7 @@ show_menu() {
   clear 2>/dev/null || true
   echo -e "
   ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
-  ${cyan}║${plain}     ${green}         NexusGate · 枢门 面板管理脚本 (v3.7)         ${plain}      ${cyan}║${plain}
+  ${cyan}║${plain}     ${green}         NexusGate · 枢门 面板管理脚本 (v3.8)         ${plain}      ${cyan}║${plain}
   ${cyan}║${plain}     ${yellow}全协议节点编排 · BBR+FQ+HY2 加速 · ACME 证书联动${plain}          ${cyan}║${plain}
   ${cyan}╚════════════════════════════════════════════════════════════════╝${plain}
   ${green}0.${plain} 退出脚本

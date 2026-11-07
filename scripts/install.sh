@@ -15,7 +15,12 @@ SB_VERSION="${NG_SINGBOX_VERSION:-1.12.23}"
 INSTALL_DIR="/opt/nexusgate"
 DATA_DIR="/var/lib/nexusgate"
 CONF_DIR="/etc/nexusgate"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
+RAW_SOURCE="${BASH_SOURCE[0]:-$0}"
+if [[ -f "$RAW_SOURCE" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "$RAW_SOURCE")" 2>/dev/null && pwd || echo "")"
+else
+  SCRIPT_DIR=""
+fi
 
 die() { echo -e "${red}[错误]${plain} $*" >&2; exit 1; }
 info() { echo -e "${cyan}[NexusGate]${plain} $*"; }
@@ -116,8 +121,13 @@ install_singbox_binary() {
   local url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/${tarball}"
 
   if [[ -x /usr/local/bin/sing-box ]]; then
-    info "检测到已安装 Sing-box: $(/usr/local/bin/sing-box version | head -n 1 || true)"
-    return 0
+    local sb_ver_line=""
+    sb_ver_line="$(/usr/local/bin/sing-box version 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$sb_ver_line" ]]; then
+      info "检测到已安装 Sing-box: ${sb_ver_line}"
+      return 0
+    fi
+    warn "检测到 /usr/local/bin/sing-box 无法正常返回版本，正在重新下载安装..."
   fi
 
   info "正在下载官方 Sing-box v${ver} (${arch}) 轻量内核..."
@@ -126,7 +136,7 @@ install_singbox_binary() {
   if curl -fL --retry 3 --connect-timeout 15 "$url" -o "$tmp/$tarball"; then
     tar -xzf "$tmp/$tarball" -C "$tmp" --strip-components=1
     install -m 0755 "$tmp/sing-box" /usr/local/bin/sing-box
-    ok "Sing-box v${ver} 内核安装完成 (/usr/local/bin/sing-box)"
+    ok "Sing-box v${ver} 内核安装完成 ($(/usr/local/bin/sing-box version 2>/dev/null | head -n 1 || echo '/usr/local/bin/sing-box'))"
   else
     warn "自动下载 Sing-box Release 失败，稍后可在面板或执行 ng 手动切换版本"
   fi
@@ -139,14 +149,14 @@ download_panel_source() {
   trap 'rm -rf -- "$tmp"' RETURN
 
   local local_src=""
-  if [[ -f "${SCRIPT_DIR}/server.js" && -f "${SCRIPT_DIR}/public/app.js" ]]; then
+  if [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/server.js" && -f "${SCRIPT_DIR}/public/app.js" && "${SCRIPT_DIR}" != "${INSTALL_DIR}" ]]; then
     local_src="${SCRIPT_DIR}"
-  elif [[ -f "${SCRIPT_DIR}/../server.js" && -f "${SCRIPT_DIR}/../public/app.js" ]]; then
-    local_src="$(cd "${SCRIPT_DIR}/.." && pwd)"
+  elif [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/../server.js" && -f "${SCRIPT_DIR}/../public/app.js" ]]; then
+    local cand_parent
+    cand_parent="$(cd "${SCRIPT_DIR}/.." && pwd)"
+    [[ "$cand_parent" != "$INSTALL_DIR" ]] && local_src="$cand_parent"
   elif [[ -f "./server.js" && -f "./public/app.js" ]]; then
     local_src="$(pwd)"
-  elif [[ -f "${INSTALL_DIR}/server.js" && -f "${INSTALL_DIR}/public/app.js" ]]; then
-    local_src="${INSTALL_DIR}"
   fi
 
   mkdir -p "$INSTALL_DIR"
@@ -155,10 +165,10 @@ download_panel_source() {
     real_src="$(cd "$local_src" && pwd)"
     real_dst="$(cd "$INSTALL_DIR" && pwd)"
     if [[ "$real_src" != "$real_dst" ]]; then
-      info "检测到本地完整源码 (${real_src})，直接复制安装..."
+      info "检测到本地源码目录 (${real_src})，直接复制安装..."
       cp -a "${real_src}/." "$INSTALL_DIR/"
     else
-      info "源码已位于安装目录 (${INSTALL_DIR})，直接进行初始化配置..."
+      info "当前位于安装目录 (${INSTALL_DIR})，使用本地源码进行配置..."
     fi
   else
     info "正在从 GitHub (${REPO}@${BRANCH}) 下载最新面板源码..."
@@ -211,45 +221,6 @@ configure_panel() {
   systemctl stop nexusgate.service nexusgate-singbox.service 2>/dev/null || true
   pkill -9 -f "sing-box run" 2>/dev/null || true
 
-  local default_port default_user default_pass default_path
-  default_port="$(gen_random_port)"
-  default_user="ng_$(gen_random_str 10)"
-  default_pass="$(gen_random_str 18 "$default_user")"
-  default_path="/$(gen_random_str 16)/"
-
-  local panel_port="$default_port"
-  local admin_user="$default_user"
-  local admin_pass="$default_pass"
-  local base_path="$default_path"
-
-  if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
-    echo ""
-    echo -e "${cyan}=== NexusGate · 枢门 v3.7 已生成本机专属高强度随机登录凭据 ===${plain}"
-    echo -e "  • 随机面板端口 : ${yellow}${default_port}${plain}"
-    echo -e "  • 随机管理账号 : ${green}${default_user}${plain}"
-    echo -e "  • 随机高强密码 : ${green}${default_pass}${plain} (18位大小写字母+数字高强度混合)"
-    echo -e "  • 随机安全路径 : ${yellow}${default_path}${plain} (16位防扫描安全根路径)"
-    local use_custom="n"
-    read -t 8 -r -p "是否直接使用以上随机高强度配置？[Y/n (直接回车或8秒后自动使用随机配置，输入 n 可手动自定义)]: " use_custom </dev/tty || true
-    if [[ "${use_custom:-Y}" =~ ^[Nn]$ ]]; then
-      read -r -p "请输入自定义面板端口 [默认随机: ${default_port}]: " input_port </dev/tty || true
-      [[ -n "${input_port:-}" ]] && panel_port="${input_port//[^0-9]/}"
-
-      read -r -p "请输入自定义管理员账号 [默认随机: ${default_user}]: " input_user </dev/tty || true
-      [[ -n "${input_user:-}" ]] && admin_user="$(echo "$input_user" | tr -d '\r\n ')"
-
-      read -r -p "请输入自定义管理员密码 [默认随机 18 位: ${default_pass}]: " input_pass </dev/tty || true
-      [[ -n "${input_pass:-}" ]] && admin_pass="$(echo "$input_pass" | tr -d '\r\n ')"
-      if [[ "$admin_pass" == "$admin_user" ]]; then
-        warn "检测到输入的密码与账号相同，已自动为您生成独立 18 位高强度随机密码！"
-        admin_pass="$(gen_random_str 18 "$admin_user")"
-      fi
-
-      read -r -p "请输入自定义面板安全路径 [默认随机: ${default_path}]: " input_path </dev/tty || true
-      [[ -n "${input_path:-}" ]] && base_path="$(echo "$input_path" | tr -d '\r\n ')"
-    fi
-  fi
-
   local pub_ip=""
   pub_ip="$(curl -fsSL4 --max-time 5 https://api.ipify.org 2>/dev/null || curl -fsSL4 --max-time 5 https://ip.sb 2>/dev/null || hostname -I | awk '{print $1}')"
   pub_ip="$(echo "$pub_ip" | tr -d '\r\n ')"
@@ -261,15 +232,74 @@ NG_SINGBOX_BIN=/usr/local/bin/sing-box
 NG_SINGBOX_CONFIG=${CONF_DIR}/sing-box/config.json
 EOF
   chmod 0600 "${CONF_DIR}/nexusgate.env"
-
   rm -rf /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
 
-  local init_json
-  init_json="$(NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --init-panel "$panel_port" "$admin_user" "$admin_pass" "$base_path" "$pub_ip")"
-  admin_user="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.username||""))')"
-  admin_pass="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.password||""))')"
-  panel_port="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.port||""))')"
-  base_path="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.basePath||"/"))')"
+  local keep_existing="n"
+  if [[ -s "${DATA_DIR}/nexusgate.json" ]]; then
+    keep_existing="y"
+    if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
+      echo ""
+      read -t 6 -r -p "检测到本机已存在面板数据与配置，是否保留现有端口、安全路径与账号密码（仅升级面板程序）？[Y/n (回车或6秒后默认保留，输入 n 重新生成随机账密与端口)]: " keep_existing </dev/tty || true
+    fi
+  fi
+
+  local panel_port="" admin_user="" admin_pass="" base_path=""
+  if [[ "${keep_existing:-Y}" =~ ^[Yy]?$ && -s "${DATA_DIR}/nexusgate.json" ]]; then
+    info "已保留现有面板端口、安全路径、管理员账号密码与全部节点数据！"
+    NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --issue-selfsigned "www.apple.com" "$pub_ip" >/dev/null 2>&1 || true
+    local cur_info
+    cur_info="$(NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --show-info-json)"
+    admin_user="$(echo "$cur_info" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.username||""))')"
+    admin_pass="$(echo "$cur_info" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.initialPassword||"（已保留原密码，如需重置可执行 ng 选 6）"))')"
+    panel_port="$(echo "$cur_info" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.port||""))')"
+    base_path="$(echo "$cur_info" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.basePath||"/"))')"
+  else
+    local default_port default_user default_pass default_path
+    default_port="$(gen_random_port)"
+    default_user="ng_$(gen_random_str 10)"
+    default_pass="$(gen_random_str 18 "$default_user")"
+    default_path="/$(gen_random_str 16)/"
+
+    panel_port="$default_port"
+    admin_user="$default_user"
+    admin_pass="$default_pass"
+    base_path="$default_path"
+
+    if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
+      echo ""
+      echo -e "${cyan}=== NexusGate · 枢门 v3.8 已生成本机专属高强度随机登录凭据 ===${plain}"
+      echo -e "  • 随机面板端口 : ${yellow}${default_port}${plain}"
+      echo -e "  • 随机管理账号 : ${green}${default_user}${plain}"
+      echo -e "  • 随机高强密码 : ${green}${default_pass}${plain} (18位大小写字母+数字高强度混合)"
+      echo -e "  • 随机安全路径 : ${yellow}${default_path}${plain} (16位防扫描安全根路径)"
+      local use_custom="n"
+      read -t 8 -r -p "是否直接使用以上随机高强度配置？[Y/n (直接回车或8秒后自动使用随机配置，输入 n 可手动自定义)]: " use_custom </dev/tty || true
+      if [[ "${use_custom:-Y}" =~ ^[Nn]$ ]]; then
+        read -r -p "请输入自定义面板端口 [默认随机: ${default_port}]: " input_port </dev/tty || true
+        [[ -n "${input_port:-}" ]] && panel_port="${input_port//[^0-9]/}"
+
+        read -r -p "请输入自定义管理员账号 [默认随机: ${default_user}]: " input_user </dev/tty || true
+        [[ -n "${input_user:-}" ]] && admin_user="$(echo "$input_user" | tr -d '\r\n ')"
+
+        read -r -p "请输入自定义管理员密码 [默认随机 18 位: ${default_pass}]: " input_pass </dev/tty || true
+        [[ -n "${input_pass:-}" ]] && admin_pass="$(echo "$input_pass" | tr -d '\r\n ')"
+        if [[ "$admin_pass" == "$admin_user" ]]; then
+          warn "检测到输入的密码与账号相同，已自动为您生成独立 18 位高强度随机密码！"
+          admin_pass="$(gen_random_str 18 "$admin_user")"
+        fi
+
+        read -r -p "请输入自定义面板安全路径 [默认随机: ${default_path}]: " input_path </dev/tty || true
+        [[ -n "${input_path:-}" ]] && base_path="$(echo "$input_path" | tr -d '\r\n ')"
+      fi
+    fi
+
+    local init_json
+    init_json="$(NG_DATA_FILE="${DATA_DIR}/nexusgate.json" node "$INSTALL_DIR/server.js" --init-panel "$panel_port" "$admin_user" "$admin_pass" "$base_path" "$pub_ip")"
+    admin_user="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.username||""))')"
+    admin_pass="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.password||""))')"
+    panel_port="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.port||""))')"
+    base_path="$(echo "$init_json" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.basePath||"/"))')"
+  fi
 
   if [[ -f /etc/x-ui/x-ui.db || -f /root/3xui_backup.tar.gz ]]; then
     local found_xui="/etc/x-ui/x-ui.db"
@@ -318,7 +348,7 @@ EOF
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate · 枢门 v3.7 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate · 枢门 v3.8 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
   echo -e " 访问地址   : ${cyan}${login_url}${plain}"
   echo -e " 登录账号   : ${green}${admin_user}${plain}"
