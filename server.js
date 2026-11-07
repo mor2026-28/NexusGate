@@ -50,7 +50,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '3.6.0';
+const VERSION = '3.7.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -136,7 +136,11 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
   }
 }
 
+let _lastSyncCertsAt = 0;
 function syncDiscoveredCerts(force = false) {
+  const now = Date.now();
+  if (!force && _lastSyncCertsAt > 0 && now - _lastSyncCertsAt < 30000) return;
+  _lastSyncCertsAt = now;
   const discovered = discoverSystemCertificates(force);
   let changed = false;
   const prevPanelCert = store.state.settings.webCertFile || '';
@@ -525,7 +529,7 @@ function handleCliCommand(args) {
     const mode = args[2] || 'merge';
     const parsed = parse3xuiPayload({ dbPath, dryRun: false });
     const rec = apply3xuiMigration(store, parsed, mode);
-    syncDiscoveredCerts();
+    syncDiscoveredCerts(true);
     singbox.writeConfig();
     const certMsg = rec.restoredCertsCount ? `, 恢复证书 ${rec.restoredCertsCount} 张 (${rec.restoredCertDomains.join(', ')})` : '';
     console.log(`成功从 ${dbPath} 备份迁移: 入站 ${rec.inboundsCount} 个 (${rec.clientsCount} 客户端), 出站 ${rec.outboundsCount} 个, 分流规则 ${rec.rulesCount} 条${certMsg}`);
@@ -1143,8 +1147,8 @@ async function handleRequest(req, res) {
     // 8. Inbounds CRUD + Batch Operations
     if (pathname === '/api/inbounds' && method === 'GET') {
       syncDiscoveredCerts();
-      if (Date.now() - singbox._lastPollAt > 1000) {
-        await singbox.pollConnectionsAndEnforceLimits().catch(() => {});
+      if (Date.now() - singbox._lastPollAt > 1500) {
+        setImmediate(() => { singbox.pollConnectionsAndEnforceLimits().catch(() => {}); });
       }
       const realCert = getActiveRealCert(store.state);
       return sendJson(res, 200, {
@@ -1460,8 +1464,8 @@ async function handleRequest(req, res) {
 
     // 9. Outbounds & Relay CRUD + URI Quick Parse + Batch URI Import + Traffic Reset
     if (pathname === '/api/outbounds' && method === 'GET') {
-      if (Date.now() - singbox._lastPollAt > 1000) {
-        await singbox.pollConnectionsAndEnforceLimits().catch(() => {});
+      if (Date.now() - singbox._lastPollAt > 1500) {
+        setImmediate(() => { singbox.pollConnectionsAndEnforceLimits().catch(() => {}); });
       }
       return sendJson(res, 200, {
         outbounds: (store.state.outbounds || []).map((o) => ({ ...o, singboxPreview: toSingboxOutbound(o) })),
@@ -1883,7 +1887,7 @@ async function handleRequest(req, res) {
 
       const prevPanelCert = store.state.settings.webCertFile || '';
       const record = apply3xuiMigration(store, parsed, mode);
-      syncDiscoveredCerts();
+      syncDiscoveredCerts(true);
       store.transact(() => store.addAudit(
         session.username,
         'backup_migrate',
@@ -1945,7 +1949,11 @@ async function handleRequest(req, res) {
         ...c,
         ...inspectCertificate(c.certPath, c.keyPath)
       }));
-      return sendJson(res, 200, { certificates: certs, settings: store.state.settings });
+      return sendJson(res, 200, {
+        certificates: certs,
+        settings: store.state.settings,
+        inbounds: (store.state.inbounds || []).map((i) => enrichInboundWithLinks(i, reqHostHeader))
+      });
     }
 
     if (pathname === '/api/certificates/self-signed' && method === 'POST') {
@@ -2099,13 +2107,20 @@ async function handleRequest(req, res) {
     // 14. Panel Security & Settings
     if (pathname === '/api/settings' && method === 'GET') {
       syncDiscoveredCerts();
-      const subItems = collectSubscriptionItems(store.state, store.state.settings.subToken, reqHostHeader);
+      const subCount = (store.state.inbounds || [])
+        .filter((i) => i.enable !== false && i.protocol !== 'direct')
+        .reduce((acc, i) => acc + Math.max(1, (i.clients || []).filter((c) => c.enable !== false).length), 0);
+      const certs = (store.state.certificates || []).map((c) => ({
+        ...c,
+        ...inspectCertificate(c.certPath, c.keyPath)
+      }));
       return sendJson(res, 200, {
         settings: store.state.settings,
         admin: { username: store.state.admin.username, updatedAt: store.state.admin.updatedAt },
-        certificates: store.state.certificates || [],
+        certificates: certs,
         migrations: store.state.migrations || [],
-        subscriptionLinksCount: subItems.length
+        local3xuiExists: fs.existsSync('/etc/x-ui/x-ui.db') || fs.existsSync('/root/3xui_backup.tar.gz'),
+        subscriptionLinksCount: subCount
       });
     }
 

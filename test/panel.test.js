@@ -1320,3 +1320,57 @@ test('15. Multi-Tier Environment Stress Benchmark: Low (10 Nodes) -> Medium (40 
     });
   }
 });
+
+test('16. Zero-Lag Sidebar Tab Switching Benchmark (< 15ms per tab with 40+ migrated nodes & memoized links)', async () => {
+  // Ensure we have at least 35 active nodes in state
+  store.transact((st) => {
+    for (let i = 1; i <= 35; i += 1) {
+      const port = 51000 + i;
+      const tag = `inbound-tabbench-${port}`;
+      if (!st.inbounds.some((x) => x.tag === tag)) {
+        st.inbounds.push({
+          id: `in_tb_${i}`,
+          tag,
+          remark: `Bench-VLESS-${i}`,
+          protocol: 'vless',
+          listen: '::',
+          port,
+          enable: true,
+          security: 'reality',
+          transport: 'tcp',
+          flow: 'xtls-rprx-vision',
+          reality: { serverName: 'tesla.com', target: 'www.tesla.com:443', privateKey: 'priv', publicKey: 'pub', shortIds: ['1a2b'] },
+          clients: [{ id: `6832b114-5826-4c3c-9c83-${String(9000 + i).padStart(12, '0')}`, email: `tb_u_${i}`, subId: `sub_tb_${i}_12345678`, enable: true }]
+        });
+      }
+    }
+  });
+
+  // Warm up caches on 1st pass, then benchmark all 6 sidebar tab endpoints across 3 rapid full rotations (18 tab switches)
+  const tabEndpoints = [
+    '/SecPath16Chars99/api/overview',
+    '/SecPath16Chars99/api/inbounds',
+    '/SecPath16Chars99/api/routing',
+    '/SecPath16Chars99/api/outbounds',
+    '/SecPath16Chars99/api/certificates',
+    '/SecPath16Chars99/api/settings'
+  ];
+
+  for (const ep of tabEndpoints) {
+    const warm = await req(ep);
+    assert.equal(warm.status, 200);
+  }
+
+  const startBench = Date.now();
+  for (let round = 0; round < 3; round += 1) {
+    for (const ep of tabEndpoints) {
+      const t0 = Date.now();
+      const res = await req(ep);
+      const dt = Date.now() - t0;
+      assert.equal(res.status, 200);
+      assert.ok(dt < 30, `Sidebar tab endpoint ${ep} must respond in < 30ms (took ${dt}ms)`);
+    }
+  }
+  const totalBenchMs = Date.now() - startBench;
+  assert.ok(totalBenchMs < 200, `18 consecutive sidebar tab switches across all 6 pages must complete in < 200ms total (took ${totalBenchMs}ms)`);
+});

@@ -291,11 +291,36 @@ function getActiveCertObject() {
   );
 }
 
+let _prewarmed = false;
+function prewarmStateInBackground() {
+  if (_prewarmed || !state.session) return;
+  _prewarmed = true;
+  loadCatalogOnce();
+  setTimeout(async () => {
+    try {
+      if (!state.inbounds.length) {
+        const d = await api('/api/inbounds');
+        if (!state.inbounds.length) state.inbounds = d.inbounds || [];
+        if (!state.outbounds.length) state.outbounds = d.outbounds || [];
+        if (!state.certificates.length) state.certificates = d.certificates || [];
+        if (d.settings && !Object.keys(state.settings).length) state.settings = d.settings;
+        if (d.defaultSettings) state.defaultSettings = d.defaultSettings;
+      }
+      if (!state.routing.rules?.length) {
+        const r = await api('/api/routing');
+        if (!state.routing.rules?.length && r.routing) state.routing = r.routing;
+      }
+    } catch { /* ignore background prewarm */ }
+  }, 120);
+}
+
 async function load(page = state.page, options = {}) {
   const isSilent = Boolean(options.silent);
   const seq = isSilent ? currentLoadSeq : ++currentLoadSeq;
   try {
-    await loadCatalogOnce();
+    if (!state.catalog.inboundProtocols.length) {
+      loadCatalogOnce();
+    }
     if (page === 'overview') {
       const ov = await api('/api/overview');
       if (page !== state.page || seq !== currentLoadSeq) return;
@@ -314,34 +339,49 @@ async function load(page = state.page, options = {}) {
       if (page !== state.page || seq !== currentLoadSeq) return;
       state.routing = data.routing || { final: 'direct', rules: [] };
       state.dns = data.dns || { strategy: 'prefer_ipv4' };
-      state.inbounds = data.inbounds || [];
-      state.outbounds = data.outbounds || [];
+      if (Array.isArray(data.inbounds)) {
+        if (!state.inbounds.length) {
+          state.inbounds = data.inbounds;
+        } else {
+          const outTagById = new Map(data.inbounds.map((x) => [x.id, x.outboundTag]));
+          state.inbounds.forEach((inb) => {
+            if (outTagById.has(inb.id)) inb.outboundTag = outTagById.get(inb.id);
+          });
+        }
+      }
+      if (Array.isArray(data.outbounds) && !state.outbounds.length) state.outbounds = data.outbounds;
     } else if (page === 'outbounds') {
       const data = await api('/api/outbounds');
       if (page !== state.page || seq !== currentLoadSeq) return;
       state.outbounds = data.outbounds || [];
-      state.inbounds = data.inbounds || [];
+      if (data.inbounds && !state.inbounds.length) state.inbounds = data.inbounds;
       if (data.routing) state.routing = data.routing;
     } else if (page === 'migrate') {
-      const [ov, st] = await Promise.all([api('/api/overview'), api('/api/settings')]);
+      const st = await api('/api/settings');
       if (page !== state.page || seq !== currentLoadSeq) return;
-      state.overview = ov;
       state.settings = st.settings || state.settings;
       state.migrations = st.migrations || [];
+      if (state.overview && st.local3xuiExists !== undefined) {
+        state.overview.local3xuiExists = st.local3xuiExists;
+      } else if (!state.overview) {
+        state.overview = { local3xuiExists: Boolean(st.local3xuiExists), counts: {} };
+      }
     } else if (page === 'certificates') {
-      const [certs, st, inbData] = await Promise.all([api('/api/certificates'), api('/api/settings'), api('/api/inbounds')]);
+      const data = await api('/api/certificates');
       if (page !== state.page || seq !== currentLoadSeq) return;
-      state.certificates = certs.certificates || [];
-      state.settings = st.settings || {};
-      state.inbounds = inbData.inbounds || [];
+      state.certificates = data.certificates || [];
+      if (data.settings) state.settings = data.settings;
+      if (data.inbounds) state.inbounds = data.inbounds;
     } else if (page === 'settings') {
-      const [st, certs] = await Promise.all([api('/api/settings'), api('/api/certificates')]);
+      const st = await api('/api/settings');
       if (page !== state.page || seq !== currentLoadSeq) return;
       state.settings = st.settings || {};
       state.admin = st.admin || {};
-      state.certificates = certs.certificates || [];
+      if (st.certificates) state.certificates = st.certificates;
+      if (st.migrations) state.migrations = st.migrations;
     }
     render();
+    prewarmStateInBackground();
   } catch (err) {
     if (!isSilent) toast(err.message, true);
   }
@@ -360,12 +400,8 @@ function setPage(page) {
     }
   } catch { /* ignore */ }
   currentLoadSeq += 1;
-  if (pageChanged) {
-    state.search = '';
-    window.scrollTo(0, 0);
-  }
   $('#app').classList.remove('sidebar-open');
-  $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
+  $('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
   const titles = {
     overview: '系统与内核总览',
     inbounds: '入站节点管理',
@@ -377,6 +413,11 @@ function setPage(page) {
   };
   $('#page-title').textContent = titles[page] || '控制台';
   $('#breadcrumb').textContent = `NexusGate · 枢门 / ${titles[page] || ''}`;
+  if (pageChanged) {
+    state.search = '';
+    window.scrollTo(0, 0);
+    render();
+  }
   load(page);
 }
 
