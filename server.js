@@ -616,6 +616,7 @@ function normalizeInboundPayload(body, existing = null) {
     expiryTime,
     resetDay,
     lastResetCycle: resetDay > 0 ? (existing?.lastResetCycle || computeResetCycleKey(resetDay)) : '',
+    lastOnline: Number(body.lastOnline ?? existing?.lastOnline ?? 0),
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -806,6 +807,9 @@ function normalizeInboundPayload(body, existing = null) {
         totalGB,
         up: 0,
         down: 0,
+        lastOnline: 0,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
         expiryTime,
         enable: true
       }
@@ -886,19 +890,34 @@ function enrichInboundWithLinks(inbound, reqHost = '') {
   const activeIps = singbox.getActiveIpsForInbound(inbound.tag);
   const activeDeviceCount = singbox.getActiveDeviceCountForInbound(inbound.tag);
   const isSingleClient = (inbound.clients?.length || 0) <= 1;
+  const nowMs = Date.now();
+  if (activeDeviceCount > 0) {
+    inbound.lastOnline = nowMs;
+  }
   const enrichedClients = (inbound.clients || []).map((c) => {
     const cKey = c.email || c.name || c.username || 'default';
     const cIps = singbox.getActiveIpsForClient(inbound.tag, cKey, isSingleClient);
     const cDevCount = singbox.getActiveDeviceCountForClient(inbound.tag, cKey, isSingleClient);
+    if (cDevCount > 0) {
+      c.lastOnline = nowMs;
+    }
+    const cLastOnline = Number(c.lastOnline || (isSingleClient ? inbound.lastOnline : 0) || 0);
+    const cCreatedAt = Number(c.createdAt || Date.parse(inbound.createdAt || '') || nowMs);
+    const cUpdatedAt = Number(c.updatedAt || Date.parse(inbound.updatedAt || '') || cCreatedAt);
     return {
       ...c,
+      lastOnline: cLastOnline,
+      createdAt: cCreatedAt,
+      updatedAt: cUpdatedAt,
       activeIps: cIps,
       activeIpCount: cIps.length,
       activeDeviceCount: cDevCount
     };
   });
+  const inbLastOnline = Math.max(Number(inbound.lastOnline || 0), ...enrichedClients.map((c) => Number(c.lastOnline || 0)));
   return {
     ...inbound,
+    lastOnline: inbLastOnline,
     clients: enrichedClients,
     activeIps,
     activeIpCount: activeIps.length,
@@ -1375,6 +1394,9 @@ async function handleRequest(req, res) {
         totalBytes: cTotalBytes,
         up: 0,
         down: 0,
+        lastOnline: 0,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
         expiryTime: cExpiry,
         enable: body.enable !== false
       };

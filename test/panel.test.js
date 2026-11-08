@@ -1617,6 +1617,40 @@ test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 
   assert.equal(elementsById.get('modal-title').textContent, '入站转发: inbound-19915 ➔ 66yun02-216.167.32.217');
   assert.ok(elementsById.get('modal-body').innerHTML.includes('value="入站转发: inbound-19915 ➔ 66yun02-216.167.32.217"'));
   sandbox.closeModal();
+
+  // Verify openClientDetailModal renders 创建时间, 更新时间, 上次在线, 使用情况, 剩余/总流量/到期时间, and URL
+  const sampleInb = {
+    id: 'in_detail_1',
+    remark: 'US-BL-23',
+    protocol: 'vless',
+    transport: 'tcp',
+    port: 16842,
+    security: 'reality',
+    outboundTag: '233boy-ss-216.167.32.217',
+    reality: { serverName: 'tesla.com', target: 'www.tesla.com:443' },
+    clients: [{
+      id: 'b10d3378-8bee-4e80-937a-1d16ecda3373',
+      email: 'uptrq3ve',
+      flow: 'xtls-rprx-vision',
+      up: 157345453,
+      down: 38181454071,
+      createdAt: 1792730157000,
+      updatedAt: 1792730157000,
+      lastOnline: 1794044230003,
+      limitIp: 0,
+      limitDevice: 5,
+      enable: true
+    }],
+    links: [{ clientId: 'b10d3378-8bee-4e80-937a-1d16ecda3373', email: 'uptrq3ve', label: 'US-BL-23-uptrq3ve', uri: 'vless://b10d3378-8bee-4e80-937a-1d16ecda3373@ppf.onliveme.com:16842?security=reality#US-BL-23' }]
+  };
+  sandbox.openClientDetailModal(sampleInb, sampleInb.clients[0]);
+  assert.equal(elementsById.get('modal-kicker').textContent, '详细信息');
+  const detailHtml = elementsById.get('modal-body').innerHTML;
+  assert.ok(detailHtml.includes('创建时间'), 'Detail modal must include 创建时间');
+  assert.ok(detailHtml.includes('更新时间'), 'Detail modal must include 更新时间');
+  assert.ok(detailHtml.includes('上次在线'), 'Detail modal must include 上次在线');
+  assert.ok(detailHtml.includes('使用情况'), 'Detail modal must include 使用情况');
+  sandbox.closeModal();
 });
 
 test('18. Real X-Panel Backup (ppfppf 3xui_backup.tar.gz) Migration: Strict Exact Inbound Tag Matching (Zero Fuzzy Cross-Binding), device_limit Column & Deduplication', async () => {
@@ -1633,6 +1667,9 @@ test('18. Real X-Panel Backup (ppfppf 3xui_backup.tar.gz) Migration: Strict Exac
     const bl23 = realParsed.inbounds.find((i) => i.remark === 'US-BL-23');
     assert.equal(bl23.outboundTag, 'ppf19.9');
     assert.equal(bl23.limitDevice, 5, 'X-Panel top-level device_limit=5 on US-BL-23 must be preserved');
+    assert.equal(bl23.clients[0].lastOnline, 1794044230003, 'X-Panel client_traffics.last_online must be migrated to client.lastOnline');
+    assert.equal(bl23.clients[0].createdAt, 1792730157000, 'X-Panel client created_at must be migrated to client.createdAt');
+    assert.equal(bl23.lastOnline, 1794044230003, 'Inbound lastOnline must reflect latest client lastOnline');
 
     const ino = realParsed.inbounds.find((i) => i.remark === 'US-inonenii-11/05');
     assert.equal(ino.outboundTag, 'ppf19.9');

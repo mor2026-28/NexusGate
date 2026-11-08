@@ -146,6 +146,15 @@ function fmtDate(val) {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short' }).format(d);
 }
 
+function fmtDateTime(val) {
+  if (!val) return '—';
+  const num = typeof val === 'number' ? val : (/^\d+$/.test(String(val)) ? Number(val) : Date.parse(String(val)));
+  if (!Number.isFinite(num) || num <= 0) return '—';
+  const d = new Date(num);
+  const pad = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 function toDatetimeLocalValue(ts) {
   const n = Number(ts || 0);
   if (!Number.isFinite(n) || n <= 0) return '';
@@ -700,7 +709,11 @@ function renderInbounds() {
     }
     const ipStyle = activeIpCount > 0 ? 'color:var(--success);font-weight:800' : '';
     const devStyle = activeDevCount > 0 ? 'color:var(--success);font-weight:800' : '';
-    const limitText = `${expiryHtml}IP: <b style="${ipStyle}">${activeIpCount}</b>/${limitIp > 0 ? limitIp : '∞'} · 设备: <b style="${devStyle}">${activeDevCount}</b>/${limitDevice > 0 ? limitDevice : '∞'}</small>`;
+    const inbLastOnline = Number(item.lastOnline || 0);
+    const inbLastOnlineHtml = activeDevCount > 0
+      ? ' · 上次在线: <b style="color:var(--success)">当前在线</b>'
+      : (inbLastOnline > 0 ? ` · 上次在线: ${esc(fmtDateTime(inbLastOnline))}` : '');
+    const limitText = `${expiryHtml}IP: <b style="${ipStyle}">${activeIpCount}</b>/${limitIp > 0 ? limitIp : '∞'} · 设备: <b style="${devStyle}">${activeDevCount}</b>/${limitDevice > 0 ? limitDevice : '∞'}${inbLastOnlineHtml}</small>`;
 
     const clients = Array.isArray(item.clients) ? item.clients : [];
     const clientCount = clients.length;
@@ -760,9 +773,18 @@ function renderInbounds() {
                           </span>
                         </td>
                         <td>
-                          <span class="tag ${cOnlineDevs > 0 ? 'tls' : ''}" title="${esc((c.activeIps || []).join(', '))}">
-                            ${cOnlineDevs > 0 ? `🟢 在线 ${cOnlineDevs} 设备` : '⚪ 离线'}
-                          </span>
+                          <div>
+                            <span class="tag ${cOnlineDevs > 0 ? 'tls' : ''}" title="${esc((c.activeIps || []).join(', '))}">
+                              ${cOnlineDevs > 0 ? `🟢 在线 ${cOnlineDevs} 设备` : '⚪ 离线'}
+                            </span>
+                          </div>
+                          <small style="margin-top:4px;display:block;color:${cOnlineDevs > 0 ? 'var(--success)' : 'var(--muted)'}">
+                            ${cOnlineDevs > 0
+                              ? `上次在线: 刚刚 (${esc(fmtDateTime(c.lastOnline || Date.now()))})`
+                              : (Number(c.lastOnline || item.lastOnline || 0) > 0
+                                  ? `上次在线: ${esc(fmtDateTime(c.lastOnline || item.lastOnline))}`
+                                  : '上次在线: 暂无记录')}
+                          </small>
                         </td>
                         <td>
                           <strong>${esc(c.email || c.name || 'user')}</strong>
@@ -779,6 +801,7 @@ function renderInbounds() {
                         <td>
                           <div class="actions">
                             <button class="primary" data-action="client-links" data-id="${esc(item.id)}" data-client-id="${esc(c.id)}">二维码/订阅</button>
+                            <button data-action="client-detail" data-id="${esc(item.id)}" data-client-id="${esc(c.id)}" title="查看详细协议参数、创建时间、更新时间与上次在线时间">ⓘ 详情</button>
                             <button data-action="edit-client" data-id="${esc(item.id)}" data-client-id="${esc(c.id)}">编辑</button>
                             <button data-action="reset-client-traffic" data-id="${esc(item.id)}" data-client-id="${esc(c.id)}">清零</button>
                             <button data-action="toggle-client" data-id="${esc(item.id)}" data-client-id="${esc(c.id)}">${c.enable !== false ? '停用' : '启用'}</button>
@@ -831,7 +854,7 @@ function renderInbounds() {
         </td>
         <td>
           <div class="actions">
-            ${item.protocol !== 'direct' ? `<button class="primary" data-action="inbound-links" data-id="${esc(item.id)}">链接 / 订阅</button>` : ''}
+            ${item.protocol !== 'direct' ? `<button class="primary" data-action="inbound-links" data-id="${esc(item.id)}">链接 / 订阅</button><button data-action="inbound-detail" data-id="${esc(item.id)}" title="查看节点与用户详细信息 (含创建时间、更新时间、上次在线)">ⓘ 详情</button>` : ''}
             ${item.protocol !== 'direct' ? `<button data-action="add-client" data-id="${esc(item.id)}" title="向该入站节点添加新用户">＋用户</button>` : ''}
             <button data-action="edit-inbound" data-id="${esc(item.id)}">编辑</button>
             <button data-action="reset-inbound-traffic" data-id="${esc(item.id)}" title="重置该节点流量">清零</button>
@@ -1626,6 +1649,128 @@ function render() {
 }
 
 /* ==================== MODALS & ACTIONS ==================== */
+
+function openClientDetailModal(inbound, client = null) {
+  const c = client || (inbound.clients && inbound.clients[0]) || {};
+  const cEmail = c.email || c.name || c.username || inbound.remark || 'default';
+  const isUuidProto = ['vless', 'vmess', 'tuic'].includes(inbound.protocol);
+  const credLabel = isUuidProto ? 'ID' : '密码 / 密钥';
+  const credVal = isUuidProto ? (c.id || c.uuid || '—') : (c.password || inbound.password || inbound.socksPassword || '—');
+  const hostAddr = inbound.publicHost || state.settings?.webDomain || state.defaultSettings?.defaultTlsDomain || state.settings?.publicIPv4 || window.location.hostname || '127.0.0.1';
+  const wsHost = inbound.wsHost || '无';
+  const wsPath = inbound.wsPath || '/';
+  const secMode = inbound.security || 'none';
+  const authDesc = secMode === 'reality'
+    ? 'X25519, Reality Vision'
+    : (secMode === 'tls' ? `TLS (${inbound.tlsDomain || hostAddr})` : 'None');
+  const sniDomains = secMode === 'reality'
+    ? ((inbound.reality?.serverNames && inbound.reality.serverNames.length)
+        ? inbound.reality.serverNames.join(', ')
+        : `${inbound.reality?.serverName || 'tesla.com'}, ${(inbound.reality?.target || 'www.tesla.com:443').split(':')[0]}`)
+    : (inbound.tlsDomain || '—');
+
+  const cUp = Number(c.up ?? inbound.up ?? 0);
+  const cDown = Number(c.down ?? inbound.down ?? 0);
+  const cUsed = cUp + cDown;
+  const cTotalBytes = Number(c.totalBytes || (c.totalGB > 0 ? (c.totalGB > 1024 * 1024 ? c.totalGB : c.totalGB * (1024 ** 3)) : 0) || inbound.total || 0);
+  const remainStr = cTotalBytes > 0 ? fmtBytes(Math.max(0, cTotalBytes - cUsed)) : '∞';
+  const totalStr = cTotalBytes > 0 ? fmtBytes(cTotalBytes) : '∞';
+  const expVal = Number(c.expiryTime || inbound.expiryTime || 0);
+  const expStr = expVal > 0 ? fmtDateTime(expVal) : '∞';
+
+  const createdStr = fmtDateTime(c.createdAt || inbound.createdAt);
+  const updatedStr = fmtDateTime(c.updatedAt || inbound.updatedAt || c.createdAt || inbound.createdAt);
+  const lastOnlineVal = Number(c.lastOnline || inbound.lastOnline || 0);
+  const isOnline = Number(c.activeDeviceCount || inbound.activeDeviceCount || 0) > 0;
+  const lastOnlineStr = isOnline
+    ? `当前在线 (${fmtDateTime(lastOnlineVal || Date.now())})`
+    : (lastOnlineVal > 0 ? fmtDateTime(lastOnlineVal) : '从未在线');
+
+  const limIpVal = Number(c.limitIp ?? inbound.limitIp ?? 0);
+  const limDevVal = Number(c.limitDevice ?? inbound.limitDevice ?? 0);
+
+  const matchedLink = (inbound.links || []).find((l) => l.clientId === c.id || l.email === cEmail) || (inbound.links && inbound.links[0]) || null;
+  const shareUri = matchedLink ? matchedLink.uri : '';
+  const linkLabel = matchedLink ? matchedLink.label : `${inbound.remark}-${cEmail}`;
+
+  openModal(
+    '详细信息',
+    `${inbound.remark} · ${cEmail}`,
+    `
+    <div class="detail-sheet">
+      <div class="detail-grid-2">
+        <div class="detail-row"><span>协议</span><span class="detail-pill purple">${esc(inbound.protocol)}</span></div>
+        <div class="detail-row"><span>传输</span><span class="detail-pill teal">${esc(inbound.transport || 'tcp')}</span></div>
+        <div class="detail-row"><span>地址</span><span class="detail-pill">${esc(hostAddr)}</span></div>
+        <div class="detail-row"><span>主机</span><span class="detail-pill warn">${esc(wsHost)}</span></div>
+        <div class="detail-row"><span>端口</span><span class="detail-pill">${esc(inbound.port)}</span></div>
+        <div class="detail-row"><span>路径</span><span class="detail-pill">${esc(wsPath)}</span></div>
+        <div class="detail-row"><span>安全</span><span class="detail-pill teal">${esc(secMode)}</span></div>
+        <div class="detail-row"><span>绑定出站</span><span class="detail-pill purple">${esc(inbound.outboundTag && inbound.outboundTag !== 'default' ? inbound.outboundTag : '默认直连 (direct)')}</span></div>
+      </div>
+
+      <div class="detail-stack">
+        <div class="detail-row"><span>Authentication</span><span class="detail-pill teal">${esc(authDesc)}</span></div>
+        <div class="detail-row"><span>加密</span><span class="detail-pill">${esc(inbound.method || 'none')}</span></div>
+        <div class="detail-row"><span>域名 (SNI)</span><span class="detail-pill teal">${esc(sniDomains)}</span></div>
+      </div>
+
+      <div class="detail-divider"><span>客户 / 用户</span></div>
+
+      <div class="detail-stack">
+        <div class="detail-row"><span>电子邮件 / 标识</span><span class="detail-pill teal">${esc(cEmail)}</span></div>
+        <div class="detail-row">
+          <span>${esc(credLabel)}</span>
+          <span class="detail-pill mono" style="cursor:pointer" data-copy="${esc(credVal)}" title="点击复制">${esc(credVal)} 📋</span>
+        </div>
+        ${inbound.protocol === 'vless' ? `<div class="detail-row"><span>Flow</span><span class="detail-pill">${esc(c.flow || inbound.flow || '无')}</span></div>` : ''}
+        <div class="detail-row">
+          <span>状态</span>
+          <span class="detail-pill ${c.enable !== false ? 'teal' : 'danger'}">${c.enable !== false ? '开启' : '已停用'}</span>
+          <span class="detail-pill ${isOnline ? 'teal' : ''}">${isOnline ? `🟢 在线 (${c.activeDeviceCount || inbound.activeDeviceCount || 1} 设备)` : '⚪ 离线'}</span>
+        </div>
+        <div class="detail-row">
+          <span>使用情况</span>
+          <span class="detail-pill teal">${fmtBytes(cUsed)}</span>
+          <span class="detail-pill">↑ ${fmtBytes(cUp)} / ${fmtBytes(cDown)} ↓</span>
+        </div>
+        <div class="detail-row"><span>创建时间</span><span class="detail-pill">${esc(createdStr)}</span></div>
+        <div class="detail-row"><span>更新时间</span><span class="detail-pill">${esc(updatedStr)}</span></div>
+        <div class="detail-row"><span>上次在线</span><span class="detail-pill ${isOnline ? 'teal' : ''}">${esc(lastOnlineStr)}</span></div>
+        <div class="detail-row">
+          <span>IP / 设备限制</span>
+          <span class="detail-pill">IP 限制: ${limIpVal}</span>
+          <span class="detail-pill">设备限制: ${limDevVal > 0 ? `${limDevVal} 台` : '0 (不限)'}</span>
+        </div>
+      </div>
+
+      <div class="detail-summary-3">
+        <div>
+          <span>剩余</span>
+          <div class="detail-pill purple">${esc(remainStr)}</div>
+        </div>
+        <div>
+          <span>总流量</span>
+          <div class="detail-pill purple">${esc(totalStr)}</div>
+        </div>
+        <div>
+          <span>到期时间</span>
+          <div class="detail-pill purple">${esc(expStr)}</div>
+        </div>
+      </div>
+
+      ${shareUri ? `
+        <div class="detail-divider"><span>URL</span></div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <span class="detail-pill teal">${esc(linkLabel)}</span>
+          <button type="button" class="primary" data-copy="${esc(shareUri)}" style="min-height:28px;padding:4px 10px;font-size:12px">📋 复制链接</button>
+        </div>
+        <div class="codebox" style="word-break:break-all;font-size:12.5px;max-height:120px;user-select:all">${esc(shareUri)}</div>
+      ` : ''}
+    </div>
+    `
+  );
+}
 
 async function openInboundModal(existing = null, preset = '') {
   const realCert = getActiveCertObject();
@@ -2974,6 +3119,15 @@ document.addEventListener('click', async (e) => {
     else if (action === 'client-links') {
       const inb = state.inbounds.find((x) => x.id === actEl.dataset.id);
       if (inb) openInboundLinksModal(inb, actEl.dataset.clientId);
+    }
+    else if (action === 'client-detail') {
+      const inb = state.inbounds.find((x) => x.id === actEl.dataset.id);
+      const cl = (inb?.clients || []).find((c) => c.id === actEl.dataset.clientId);
+      if (inb) openClientDetailModal(inb, cl || null);
+    }
+    else if (action === 'inbound-detail') {
+      const inb = state.inbounds.find((x) => x.id === actEl.dataset.id);
+      if (inb) openClientDetailModal(inb, (inb.clients && inb.clients[0]) || null);
     }
     else if (action === 'reset-client-traffic') {
       const inbId = actEl.dataset.id;
