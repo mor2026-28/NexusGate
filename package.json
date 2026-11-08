@@ -1,8 +1,8 @@
 {
   "name": "nexusgate-singbox",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "private": true,
-  "description": "NexusGate · 枢门 轻量级全协议节点与中转分流管理面板",
+  "description": "NexusGate \u00b7 \u67a2\u95e8 \u8f7b\u91cf\u7ea7\u5168\u534f\u8bae\u8282\u70b9\u4e0e\u4e2d\u8f6c\u5206\u6d41\u7ba1\u7406\u9762\u677f",
   "type": "commonjs",
   "engines": {
     "node": ">=18"

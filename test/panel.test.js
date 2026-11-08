@@ -1881,3 +1881,104 @@ test('19. Long-Duration 30-Day (720-Hour) Continuous Operation Simulation: Memor
     await new Promise((r) => mockLongClash.close(r));
   }
 });
+
+
+test('20. v5.1 Deep Audit: Bi-Directional Single-Client <-> Inbound Sync, HY2/AnyTLS/TUIC Timestamp Migration & Multi-Round E2E Simulation', async () => {
+  const { convert3xuiInbound } = require('../lib/migrate3xui');
+
+  // 1) Create a single-client VLESS inbound and verify bi-directional sync between Inbound Edit and Client Edit
+  const createInbRes = await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify({
+      remark: 'SyncTest-Node',
+      port: 54321,
+      protocol: 'vless',
+      security: 'reality',
+      limitIp: 2,
+      limitDevice: 5,
+      totalGB: 50
+    })
+  });
+  assert.equal(createInbRes.status, 201);
+  const inb = createInbRes.json.inbound;
+  const c0 = inb.clients[0];
+  assert.equal(inb.limitDevice, 5);
+  assert.equal(c0.limitDevice, 5);
+  assert.equal(c0.totalGB, 50);
+
+  // Edit the sole client via PUT /api/inbounds/:id/clients/:clientId -> parent inbound must also sync!
+  const putClientRes = await req(`/SecPath16Chars99/api/inbounds/${inb.id}/clients/${encodeURIComponent(c0.id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      email: c0.email,
+      limitIp: 4,
+      limitDevice: 8,
+      totalGB: 120,
+      expiryTime: 1893456000000
+    })
+  });
+  assert.equal(putClientRes.status, 200);
+  const syncedInb1 = putClientRes.json.inbound;
+  assert.equal(syncedInb1.limitIp, 4, 'Parent inbound limitIp must sync when sole client is edited');
+  assert.equal(syncedInb1.limitDevice, 8, 'Parent inbound limitDevice must sync when sole client is edited');
+  assert.equal(syncedInb1.total, 120 * (1024 ** 3), 'Parent inbound total must sync when sole client is edited');
+  assert.equal(syncedInb1.expiryTime, 1893456000000, 'Parent inbound expiryTime must sync when sole client is edited');
+
+  // Now edit the parent inbound via PUT /api/inbounds/:id -> sole client totalGB/totalBytes/limits must also sync!
+  const putInbRes = await req(`/SecPath16Chars99/api/inbounds/${inb.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      remark: 'SyncTest-Node',
+      port: 54321,
+      protocol: 'vless',
+      security: 'reality',
+      limitIp: 6,
+      limitDevice: 10,
+      totalGB: 250,
+      expiryTime: 1896048000000
+    })
+  });
+  assert.equal(putInbRes.status, 200);
+  const syncedInb2 = putInbRes.json.inbound;
+  assert.equal(syncedInb2.clients[0].limitIp, 6, 'Sole client limitIp must sync when parent inbound is edited');
+  assert.equal(syncedInb2.clients[0].limitDevice, 10, 'Sole client limitDevice must sync when parent inbound is edited');
+  assert.equal(syncedInb2.clients[0].totalGB, 250, 'Sole client totalGB must sync when parent inbound is edited');
+  assert.equal(syncedInb2.clients[0].totalBytes, 250 * (1024 ** 3), 'Sole client totalBytes must sync when parent inbound is edited');
+  assert.equal(syncedInb2.clients[0].expiryTime, 1896048000000, 'Sole client expiryTime must sync when parent inbound is edited');
+
+  // Clean up test node
+  await req(`/SecPath16Chars99/api/inbounds/${inb.id}`, { method: 'DELETE' });
+
+  // 2) Verify convert3xuiInbound for hysteria2 / anytls / tuic preserves client_traffics (up, down, last_online, created_at, updated_at, device_limit)
+  for (const proto of ['hysteria2', 'anytls', 'tuic']) {
+    const converted = convert3xuiInbound(
+      {
+        id: 99,
+        remark: `Mig-${proto}`,
+        port: 49999,
+        protocol: proto,
+        device_limit: 5,
+        enable: 1,
+        settings: JSON.stringify({
+          clients: [{
+            id: 'b10d3378-8bee-4e80-937a-1d16ecda3373',
+            email: `user_${proto}`,
+            password: 'StrongPass999',
+            created_at: 1790000000000,
+            updated_at: 1791000000000
+          }]
+        }),
+        stream_settings: JSON.stringify({ security: 'tls' })
+      },
+      [{ email: `user_${proto}`, up: 10485760, down: 52428800, all_time: 62914560, last_online: 1794050000000, total: 0, expiry_time: 0 }]
+    );
+    assert.equal(converted.limitDevice, 5);
+    assert.equal(converted.clients[0].limitDevice, 5);
+    assert.equal(converted.clients[0].up, 10485760);
+    assert.equal(converted.clients[0].down, 52428800);
+    assert.equal(converted.clients[0].lastOnline, 1794050000000);
+    assert.equal(converted.clients[0].createdAt, 1790000000000);
+    assert.equal(converted.clients[0].updatedAt, 1791000000000);
+    assert.equal(converted.lastOnline, 1794050000000);
+  }
+});

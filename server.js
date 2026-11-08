@@ -51,7 +51,7 @@ const {
 const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '5.0.0';
+const VERSION = '5.1.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -761,6 +761,10 @@ function normalizeInboundPayload(body, existing = null) {
         totalBytes: cTotalBytes,
         up: Number(c.up ?? prevClient.up ?? 0),
         down: Number(c.down ?? prevClient.down ?? 0),
+        allTime: Number(c.allTime ?? prevClient.allTime ?? 0),
+        lastOnline: Number(c.lastOnline ?? prevClient.lastOnline ?? 0),
+        createdAt: Number(c.createdAt || prevClient.createdAt || Date.now()),
+        updatedAt: Date.now(),
         expiryTime: cExpiry,
         enable: c.enable !== undefined ? Boolean(c.enable) : (prevClient.enable !== false)
       };
@@ -776,7 +780,10 @@ function normalizeInboundPayload(body, existing = null) {
       username: idx === 0 && ['socks', 'mixed', 'http'].includes(inbound.protocol) && inbound.socksUser ? inbound.socksUser : c.username,
       limitIp: isMulti ? Number(c.limitIp ?? 0) : inbound.limitIp,
       limitDevice: isMulti ? Number(c.limitDevice ?? 0) : inbound.limitDevice,
+      totalGB: isMulti ? Number(c.totalGB ?? 0) : totalGB,
+      totalBytes: isMulti ? Number(c.totalBytes ?? 0) : total,
       expiryTime: isMulti ? Number(c.expiryTime ?? 0) : inbound.expiryTime,
+      updatedAt: idx === 0 ? Date.now() : Number(c.updatedAt || c.createdAt || Date.now()),
       flow: inbound.protocol === 'vless' ? (idx === 0 && body.flow !== undefined ? body.flow : (c.flow ?? inbound.flow ?? '')) : c.flow,
       password: idx === 0 && ['anytls', 'hysteria2', 'trojan', 'shadowsocks', 'tuic'].includes(inbound.protocol) && inbound.password
         ? inbound.password
@@ -1449,6 +1456,15 @@ async function handleRequest(req, res) {
         if (body.enable !== undefined) {
           client.enable = Boolean(body.enable);
           if (client.enable) delete client.disabledReason;
+        }
+        client.updatedAt = Date.now();
+        // If this inbound has only 1 client, keep the parent inbound limits/quota/expiry in sync with its sole client
+        if (existing.clients.length === 1) {
+          if (body.limitIp !== undefined) existing.limitIp = client.limitIp;
+          if (body.limitDevice !== undefined) existing.limitDevice = client.limitDevice;
+          if (body.totalGB !== undefined) existing.total = client.totalBytes;
+          if (body.expiryTime !== undefined) existing.expiryTime = client.expiryTime;
+          existing.updatedAt = new Date().toISOString();
         }
         store.addAudit(session.username, 'update_inbound_client', `${existing.remark} -> ${client.email}`);
       });
