@@ -48,7 +48,7 @@ const {
   tcpPingHostPort,
   openFirewallPorts
 } = require('./lib/system');
-const { parse3xuiPayload, apply3xuiMigration } = require('./lib/migrate3xui');
+const { parse3xuiPayload, apply3xuiMigration, restoreInlineCertificates } = require('./lib/migrate3xui');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
 const VERSION = '5.1.0';
@@ -62,6 +62,48 @@ sessions.setMaxAgeMinutes(store.state.settings.sessionMaxAge || 720);
 const singbox = new SingboxManager(store);
 const loginAttempts = new Map();
 let activeServer = null;
+
+
+function buildPortableBackupState(st = store.state) {
+  try { syncDiscoveredCerts(); } catch { /* ignore */ }
+  const portable = JSON.parse(JSON.stringify(st));
+  portable.exportedAt = new Date().toISOString();
+  portable.panelVersion = VERSION;
+  if (!Array.isArray(portable.certificates)) portable.certificates = [];
+
+  for (const c of portable.certificates) {
+    if (c && c.certPath && c.keyPath && fs.existsSync(c.certPath) && fs.existsSync(c.keyPath)) {
+      try {
+        c.certPem = fs.readFileSync(c.certPath, "utf8");
+        c.keyPem = fs.readFileSync(c.keyPath, "utf8");
+      } catch { /* ignore */ }
+    }
+  }
+
+  const s = portable.settings || {};
+  if (s.webCertFile && s.webKeyFile && fs.existsSync(s.webCertFile) && fs.existsSync(s.webKeyFile)) {
+    const alreadyInList = portable.certificates.some((c) => c.certPath === s.webCertFile || (s.webDomain && c.domain === s.webDomain));
+    if (!alreadyInList) {
+      try {
+        const meta = inspectCertificate(s.webCertFile, s.webKeyFile);
+        const domain = s.webDomain || s.defaultTlsDomain || path.basename(path.dirname(s.webCertFile)) || "panel-cert";
+        portable.certificates.unshift({
+          id: `cert_${crypto.createHash("md5").update(s.webCertFile).digest("hex").slice(0, 10)}`,
+          domain,
+          type: meta.isSelfSigned ? "self-signed" : "acme- Let's Encrypt",
+          certPath: s.webCertFile,
+          keyPath: s.webKeyFile,
+          certPem: fs.readFileSync(s.webCertFile, "utf8"),
+          keyPem: fs.readFileSync(s.webKeyFile, "utf8"),
+          createdAt: new Date().toISOString(),
+          ...meta
+        });
+      } catch { /* ignore */ }
+    }
+  }
+
+  return portable;
+}
 
 function getActiveRealCert(st = store.state) {
   const certs = st.certificates || [];
@@ -538,6 +580,15 @@ function handleCliCommand(args) {
     ];
     const res = openFirewallPorts(ports);
     console.log(`已自动放行端口: ${res.openedPorts.join(', ')}`);
+    return;
+  }
+  if (cmd === '--export-backup') {
+    const outJsonPath = args[1] || `/root/nexusgate-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    const portable = buildPortableBackupState(store.state);
+    fs.mkdirSync(path.dirname(path.resolve(outJsonPath)), { recursive: true });
+    fs.writeFileSync(outJsonPath, JSON.stringify(portable, null, 2), { mode: 0o600 });
+    const certsCount = (portable.certificates || []).filter((c) => c.certPem && c.keyPem).length;
+    console.log(`已导出全量便携备份 (含 ${(portable.inbounds || []).length} 个入站, ${(portable.outbounds || []).filter((o) => !o.builtin).length} 个出站, ${certsCount} 张内嵌 SSL 证书与域名配置): ${outJsonPath}`);
     return;
   }
   if (cmd === '--migrate-3xui') {
@@ -1953,9 +2004,20 @@ async function handleRequest(req, res) {
       } else {
         const body = await readJson(req);
         if (body.source === 'local') {
-          let localPath = body.dbPath || '/etc/x-ui/x-ui.db';
-          if (!fs.existsSync(localPath) && fs.existsSync('/root/3xui_backup.tar.gz')) {
-            localPath = '/root/3xui_backup.tar.gz';
+          let localPath = String(body.dbPath || '/etc/x-ui/x-ui.db').trim().replace(/^["']+|["']+$/g, '');
+          if (!fs.existsSync(localPath)) {
+            const candidates = ['/root/3xui_backup.tar.gz', '/etc/x-ui/x-ui.db'];
+            try {
+              const rootFiles = fs.readdirSync('/root')
+                .filter((f) => /\.(tar\.gz|tgz|db|json)$/i.test(f))
+                .map((f) => path.join('/root', f))
+                .sort((a, b) => {
+                  try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
+                });
+              candidates.push(...rootFiles);
+            } catch { /* ignore */ }
+            const found = candidates.find((p) => fs.existsSync(p));
+            if (found) localPath = found;
           }
           parsed = parse3xuiPayload({ dbPath: localPath, dryRun });
         } else if (body.dbBase64) {
@@ -2303,7 +2365,8 @@ async function handleRequest(req, res) {
 
     // 15. Backup & Restore
     if (pathname === '/api/backup' && method === 'GET') {
-      const payload = JSON.stringify(store.state, null, 2);
+      const portable = buildPortableBackupState(store.state);
+      const payload = JSON.stringify(portable, null, 2);
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'content-disposition': `attachment; filename="nexusgate-backup-${new Date().toISOString().slice(0, 10)}.json"`
@@ -2315,21 +2378,27 @@ async function handleRequest(req, res) {
     if (pathname === '/api/restore' && method === 'POST') {
       const body = await readJson(req);
       const data = body.backup || body;
-      if (!data || !Array.isArray(data.inbounds) || !Array.isArray(data.outbounds)) {
+      if (!data || (!Array.isArray(data.inbounds) && !Array.isArray(data.certificates))) {
         return sendError(res, 400, '备份文件结构无效');
       }
+      const parsed = parse3xuiPayload({ jsonPayload: data, dryRun: false });
+      const rec = apply3xuiMigration(store, parsed, 'replace');
       store.transact((st) => {
-        st.inbounds = data.inbounds;
-        st.outbounds = data.outbounds;
-        if (data.routing) st.routing = data.routing;
         if (data.dns) st.dns = data.dns;
-        if (data.certificates) st.certificates = data.certificates;
         syncRoutingRulesToInbounds(st);
-        store.addAudit(session.username, 'restore_backup', `恢复 ${data.inbounds.length} 个入站`);
+        store.addAudit(session.username, 'restore_backup', `恢复 ${rec.inboundsCount} 个入站 (${rec.clientsCount} 客户端), ${rec.restoredCertsCount || 0} 张证书`);
       });
+      syncDiscoveredCerts(true);
       const restoredPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
       autoApplyIfEnabled(restoredPorts);
-      return sendJson(res, 200, { ok: true, inboundsCount: store.state.inbounds.length, outboundsCount: store.state.outbounds.length });
+      return sendJson(res, 200, {
+        ok: true,
+        inboundsCount: store.state.inbounds.length,
+        clientsCount: rec.clientsCount,
+        outboundsCount: store.state.outbounds.filter((o) => !o.builtin).length,
+        restoredCertsCount: rec.restoredCertsCount || 0,
+        restoredCertDomains: rec.restoredCertDomains || []
+      });
     }
 
     return sendError(res, 404, `未找到接口: ${pathname}`, 'not_found');

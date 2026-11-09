@@ -1238,12 +1238,15 @@ function renderMigrate() {
     <section class="grid-2">
       <article class="panel">
         <div class="panel-head">
-          <div><h2>方式一：上传备份文件 (x-ui.db / .tar.gz) 或读取本机</h2><p>支持直接上传 x-ui.db 数据库、或包含 /etc/x-ui/x-ui.db + /root/cert + /root/.acme.sh 的 .tar.gz 备份包，完整还原全部节点、中转出站、路由规则与 SSL 自动续签证书</p></div>
+          <div><h2>方式一：上传备份文件 (NG 备份 .json / x-ui.db / .tar.gz) 或读取本机</h2><p>全面兼容 NexusGate 原生全量备份 (含内嵌 SSL 证书与域名) 以及 3x-ui / X-Panel 的 x-ui.db / .tar.gz 备份包，一键完整还原全部节点、客户端、中转出站、路由规则与 SSL 域名证书</p></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button type="button" class="primary" data-action="export-backup">⬇ 导出本机全量备份 (含节点+SSL证书)</button>
+          </div>
         </div>
         <div class="panel-body stack">
           <label class="upload-dropzone" for="xui-db-file">
             <input type="file" id="xui-db-file" accept=".db,.sqlite,.sqlite3,.gz,.tgz,.json" class="hidden">
-            <b style="display:block;font-size:15px;margin-bottom:6px">📁 点击选择或拖拽上传 <code>x-ui.db</code> 或 <code>3xui_backup.tar.gz</code></b>
+            <b style="display:block;font-size:15px;margin-bottom:6px">📁 点击选择或拖拽上传 <code>nexusgate-backup.json</code> / <code>x-ui.db</code> / <code>.tar.gz</code></b>
             <span class="muted" style="font-size:12px" id="xui-file-label">支持 SQLite3 数据库 (x-ui.db)、通用 .tar.gz 备份包或 JSON 文件</span>
           </label>
 
@@ -1906,12 +1909,12 @@ async function openInboundModal(existing = null, preset = '') {
       <label>
         限制同时在线公网 IP 数 (0 = 不限制)
         <input name="limitIp" type="number" min="0" max="1000" value="${esc(item.limitIp || 0)}" placeholder="0 表示不限制公网 IP 数">
-        <small>超出设定数量时，仅拦截并断开第 N+1 个新接入的 IP，前 N 个已在线 IP/设备不受影响正常使用</small>
+        <small>按不同宽带/流量卡公网出口 IP 统计；超出时仅拦截第 N+1 个新公网 IP，前 N 个已在线网络不断流</small>
       </label>
       <label>
         限制同时在线设备数 (0 = 不限制)
         <input name="limitDevice" type="number" min="0" max="2000" value="${esc(item.limitDevice || 0)}" placeholder="0 表示不限制设备台数">
-        <small>超出设定数量时，仅拦截并断开第 N+1 台新接入的设备，前 N 台已在线设备不受影响正常使用</small>
+        <small>按 (公网 IP + 子用户凭证) 会话统计：同 Wi-Fi 共用同一节点视为 1 个家庭出口防误封，切流量卡/异地分享超出即拦截</small>
       </label>
 
       <label>

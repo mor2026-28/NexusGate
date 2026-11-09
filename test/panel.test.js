@@ -1982,3 +1982,80 @@ test('20. v5.1 Deep Audit: Bi-Directional Single-Client <-> Inbound Sync, HY2/An
     assert.equal(converted.lastOnline, 1794050000000);
   }
 });
+
+
+test("21. Cross-Server NexusGate Native Backup & 3x-ui Tarball Universal Migration (Nodes, Clients, Outbounds, Routing, and Embedded SSL Certificates & Domain)", async () => {
+  const { parse3xuiPayload, apply3xuiMigration } = require("../lib/migrate3xui");
+  const { Store } = require("../lib/store");
+  const userTarPath = "/working_dir/c_705d4f468dc5a47a/user_uploaded_files/ttl=63d/user_uploaded/ppfppf 3xui_backup.tar.gz";
+
+  if (fs.existsSync(userTarPath)) {
+    // Step 1: Import user's 3x-ui backup tarball into Server A via /api/migrate/3xui
+    const tarBuf = fs.readFileSync(userTarPath);
+    const migResA = await req("/SecPath16Chars99/api/migrate/3xui?mode=replace", {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: tarBuf
+    });
+    assert.equal(migResA.status, 200);
+    assert.equal(migResA.json.summary.inboundsCount, 6);
+    assert.equal(migResA.json.summary.clientsCount, 6);
+    assert.equal(migResA.json.summary.outboundsCount, 6);
+    assert.ok(migResA.json.summary.restoredCertDomains.includes("ppf.onliveme.com"));
+
+    // Step 2: Export portable backup JSON from Server A via GET /api/backup
+    const backupRes = await req("/SecPath16Chars99/api/backup");
+    assert.equal(backupRes.status, 200);
+    const exportedNgBackup = backupRes.json;
+    assert.equal(exportedNgBackup.inbounds.length, 6);
+    const ppfCertEntry = (exportedNgBackup.certificates || []).find((c) => c.domain === "ppf.onliveme.com");
+    assert.ok(ppfCertEntry, "Exported NexusGate backup JSON must include ppf.onliveme.com certificate");
+    assert.ok(ppfCertEntry.certPem && ppfCertEntry.certPem.includes("BEGIN CERTIFICATE"), "Exported JSON must embed certPem");
+    assert.ok(ppfCertEntry.keyPem && ppfCertEntry.keyPem.includes("PRIVATE KEY"), "Exported JSON must embed keyPem");
+
+    // Step 3: Simulate brand-new Server B with a clean certificate directory (no prior /root/cert/ppf.onliveme.com)
+    const srvBDir = fs.mkdtempSync(path.join(os.tmpdir(), "ng-srvB-"));
+    const prevCertDir = process.env.NG_CERT_DIR;
+    process.env.NG_CERT_DIR = path.join(srvBDir, "certs");
+    try {
+      const storeB = new Store(path.join(srvBDir, "nexusgate.json"));
+      // Initially Server B has 0 inbounds and default www.apple.com domain
+      assert.equal(storeB.state.inbounds.length, 0);
+
+      // User uploads nexusgate-backup-YYYY-MM-DD.json into #migrate (parse3xuiPayload + apply3xuiMigration)
+      const bufJson = Buffer.from(JSON.stringify(exportedNgBackup), "utf8");
+      const parsedOnB = parse3xuiPayload({ dbBuffer: bufJson, dryRun: false });
+      assert.equal(parsedOnB.summary.inboundsCount, 6, "Must preserve all 6 NexusGate native inbounds");
+      assert.equal(parsedOnB.summary.clientsCount, 6, "Must preserve all 6 clients (never 0 clients!)");
+      assert.equal(parsedOnB.summary.outboundsCount, 6, "Must preserve all 6 custom outbounds");
+      assert.ok(parsedOnB.summary.restoredCertDomains.includes("ppf.onliveme.com"), "Must restore embedded ppf.onliveme.com SSL certificate to Server B disk");
+
+      // Verify every outbound has valid server and port (never undefined:undefined)
+      for (const o of parsedOnB.outbounds.filter((x) => !x.builtin)) {
+        assert.ok(o.server && o.server !== "undefined", `Outbound ${o.tag} server must be valid, got ${o.server}`);
+        assert.ok(Number.isInteger(o.port) && o.port > 0, `Outbound ${o.tag} port must be valid, got ${o.port}`);
+      }
+
+      // Apply migration on Server B in replace mode
+      const recB = apply3xuiMigration(storeB, parsedOnB, "replace");
+      assert.equal(recB.inboundsCount, 6);
+      assert.equal(recB.clientsCount, 6);
+      assert.equal(storeB.state.settings.webDomain, "ppf.onliveme.com", "Server B webDomain must automatically update to ppf.onliveme.com");
+      assert.equal(storeB.state.settings.defaultTlsDomain, "ppf.onliveme.com", "Server B defaultTlsDomain must automatically update to ppf.onliveme.com");
+      assert.ok(fs.existsSync(storeB.state.settings.webCertFile), "Restored fullchain.pem must exist on Server B disk");
+      assert.ok(fs.existsSync(storeB.state.settings.webKeyFile), "Restored privkey.pem must exist on Server B disk");
+
+      // Verify Reality inbounds on Server B kept their exact privateKey, publicKey, shortIds, and client UUIDs
+      const usBl23 = storeB.state.inbounds.find((i) => i.remark === "US-BL-23");
+      assert.ok(usBl23, "US-BL-23 inbound must exist on Server B");
+      assert.equal(usBl23.clients.length, 1);
+      assert.equal(usBl23.clients[0].id, "b10d3378-8bee-4e80-937a-1d16ecda3373");
+      assert.ok(usBl23.reality && usBl23.reality.privateKey && usBl23.reality.publicKey);
+      assert.equal(usBl23.outboundTag, "ppf19.9");
+    } finally {
+      if (prevCertDir === undefined) delete process.env.NG_CERT_DIR;
+      else process.env.NG_CERT_DIR = prevCertDir;
+      fs.rmSync(srvBDir, { recursive: true, force: true });
+    }
+  }
+});

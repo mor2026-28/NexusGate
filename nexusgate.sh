@@ -528,13 +528,44 @@ switch_singbox_version() {
   ok "Sing-box 内核已成功切换至: $(/usr/local/bin/sing-box version | head -n 1)"
 }
 
+export_panel_backup() {
+  need_root
+  local date_str
+  date_str="$(date +%F)"
+  local json_out="/root/nexusgate-backup-${date_str}.json"
+  local tar_out="/root/nexusgate-backup-${date_str}.tar.gz"
+  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --export-backup "$json_out"
+  local tar_items=()
+  [[ -d /etc/nexusgate ]] && tar_items+=("etc/nexusgate")
+  [[ -d /root/cert ]] && tar_items+=("root/cert")
+  [[ -d /root/.acme.sh ]] && tar_items+=("root/.acme.sh")
+  if [[ ${#tar_items[@]} -gt 0 ]]; then
+    tar -czf "$tar_out" -C / "${tar_items[@]}" 2>/dev/null || true
+    ok "已同步打包完整归档备份包 (含证书目录与 .acme.sh 自动续签): ${tar_out}"
+  fi
+  ok "全量便携备份已完成！可将 ${json_out} 或 ${tar_out} 直接导入任意新服务器自动还原全部节点、转发与 SSL 域名证书。"
+}
+
 migrate_3xui() {
   need_root
   local default_db="/etc/x-ui/x-ui.db"
-  [[ ! -f "$default_db" && -f /root/3xui_backup.tar.gz ]] && default_db="/root/3xui_backup.tar.gz"
+  if [[ ! -f "$default_db" ]]; then
+    if [[ -f /root/3xui_backup.tar.gz ]]; then
+      default_db="/root/3xui_backup.tar.gz"
+    else
+      local found_tar=""
+      found_tar="$(ls -1t /root/*.tar.gz /root/*.tgz /root/nexusgate-backup*.json 2>/dev/null | head -n 1 || true)"
+      [[ -n "$found_tar" && -f "$found_tar" ]] && default_db="$found_tar"
+    fi
+  fi
+  echo -e "${cyan}支持导入: NexusGate 备份 (.json / .tar.gz) 或 3x-ui / X-Panel 备份 (x-ui.db / .tar.gz)${plain}"
   local db_path=""
-  read -r -p "请输入备份数据库或通用备份包路径 [默认 ${default_db}]: " db_path </dev/tty || true
+  read -r -p "请输入备份文件路径 [默认 ${default_db}]: " db_path </dev/tty || true
   db_path="${db_path:-$default_db}"
+  db_path="${db_path%\"}"
+  db_path="${db_path#\"}"
+  db_path="${db_path%'}"
+  db_path="${db_path#'}"
   systemctl stop nexusgate.service nexusgate-singbox.service 2>/dev/null || true
   pkill -9 -f "sing-box run" 2>/dev/null || true
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --migrate-3xui "$db_path" merge
@@ -658,7 +689,7 @@ show_menu() {
     0) exit 0 ;;
     1) bash "$INSTALL_DIR/install.sh" ;;
     2) update_panel ; pause_return ;;
-    3) cp -f "$DATA_FILE" "/root/nexusgate-backup-$(date +%F).json" && ok "已备份至 /root/nexusgate-backup-$(date +%F).json" ; pause_return ;;
+    3) export_panel_backup ; pause_return ;;
     4) switch_singbox_version ; pause_return ;;
     5) uninstall_panel ;;
     6) change_account ; pause_return ;;
