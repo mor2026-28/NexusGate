@@ -1238,16 +1238,16 @@ function renderMigrate() {
     <section class="grid-2">
       <article class="panel">
         <div class="panel-head">
-          <div><h2>方式一：上传备份文件 (NG 备份 .json / x-ui.db / .tar.gz) 或读取本机</h2><p>全面兼容 NexusGate 原生全量备份 (含内嵌 SSL 证书与域名) 以及 3x-ui / X-Panel 的 x-ui.db / .tar.gz 备份包，一键完整还原全部节点、客户端、中转出站、路由规则与 SSL 域名证书</p></div>
+          <div><h2>方式一：上传单文件全量备份包 (.tar.gz / .zip / x-ui.db) 或读取本机</h2><p>全面兼容 NexusGate 全量主控灾备包 (单包内置 nexusgate.json + 物理 SSL 证书 + .acme.sh 自动续签) 以及 3x-ui / X-Panel 备份包，一键完整还原全部节点、客户端、中转出站、路由规则与 SSL 域名证书</p></div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button type="button" class="primary" data-action="export-backup">⬇ 导出本机全量备份 (含节点+SSL证书)</button>
+            <a class="button primary" href="${BASE_PATH}/api/backup?format=targz" target="_blank">📦 导出全量主控灾备包 (.tar.gz)</a>
           </div>
         </div>
         <div class="panel-body stack">
           <label class="upload-dropzone" for="xui-db-file">
-            <input type="file" id="xui-db-file" accept=".db,.sqlite,.sqlite3,.gz,.tgz,.json" class="hidden">
-            <b style="display:block;font-size:15px;margin-bottom:6px">📁 点击选择或拖拽上传 <code>nexusgate-backup.json</code> / <code>x-ui.db</code> / <code>.tar.gz</code></b>
-            <span class="muted" style="font-size:12px" id="xui-file-label">支持 SQLite3 数据库 (x-ui.db)、通用 .tar.gz 备份包或 JSON 文件</span>
+            <input type="file" id="xui-db-file" accept=".tar.gz,.tgz,.gz,.zip,.db,.sqlite,.sqlite3,.json" class="hidden">
+            <b style="display:block;font-size:15px;margin-bottom:6px">📁 点击选择或拖拽上传 <code>nexusgate-backup.tar.gz</code> / <code>3xui_backup.tar.gz</code> / <code>x-ui.db</code></b>
+            <span class="muted" style="font-size:12px" id="xui-file-label">支持单文件全量灾备包 (.tar.gz / .zip)、3x-ui 数据库 (x-ui.db) 或 JSON 文件</span>
           </label>
 
           <label>
@@ -1256,6 +1256,11 @@ function renderMigrate() {
               <option value="merge">智能合并（保留当前面板已有节点，同端口/同Tag自动更新）</option>
               <option value="replace">完整替换（清空当前节点，完整还原导入的入站、出站与路由转发）</option>
             </select>
+          </label>
+
+          <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="migrate-clone-panel" style="width:16px;min-height:16px" checked>
+            <span>1:1 完整克隆恢复原面板的访问端口、安全根路径、登录账号密码、订阅安全码与面板绑定域名</span>
           </label>
 
           <div style="display:flex;flex-wrap:wrap;gap:8px">
@@ -1437,8 +1442,8 @@ function renderSettings() {
   return `
     <div class="action-bar">
       <div class="action-bar-left">
-        <a class="button primary" href="${BASE_PATH}/api/backup" target="_blank">⬇ 导出完整面板备份 (.json)</a>
-        <button data-action="restore-backup-modal">⬆ 导入恢复备份</button>
+        <a class="button primary" href="${BASE_PATH}/api/backup?format=targz" target="_blank">📦 导出全量主控灾备包 (.tar.gz)</a>
+        <button data-action="restore-backup-modal">⬆ 一键导入恢复主控备份 (.tar.gz / .zip / .json)</button>
       </div>
     </div>
 
@@ -3371,48 +3376,70 @@ document.addEventListener('click', async (e) => {
       toast(`成功切换内核版本: ${res.version?.version || version}`);
       load('overview');
     }
+    else if (action === 'export-backup') {
+      window.open(`${BASE_PATH}/api/backup?format=targz`, '_blank');
+    }
     else if (action === 'preview-xui-file' || action === 'apply-xui-file') {
       const fileInput = $('#xui-db-file');
       const file = fileInput?.files?.[0];
-      if (!file) { toast('请先选择要上传的 x-ui.db 或 .tar.gz 备份文件', true); return; }
+      if (!file) { toast('请先选择要上传的 .tar.gz / .zip / x-ui.db 备份文件', true); return; }
       const mode = $('#migrate-mode')?.value || 'merge';
+      const clonePanel = Boolean($('#migrate-clone-panel')?.checked);
       const dryRun = action === 'preview-xui-file';
       const buf = await file.arrayBuffer();
-      const res = await api(`/api/migrate/3xui?mode=${mode}&dryRun=${dryRun}`, {
+      const res = await api(`/api/migrate/3xui?mode=${mode}&dryRun=${dryRun}&clonePanel=${clonePanel}`, {
         method: 'POST',
         headers: { 'content-type': 'application/octet-stream' },
         body: buf
       });
       if (dryRun) {
         state.migrationPreview = res;
-        toast(`解析成功: 发现 ${res.summary.inboundsCount} 个入站与 ${res.summary.outboundsCount} 个出站`);
+        toast(`解析成功: 发现 ${res.summary.inboundsCount} 个入站 (${res.summary.clientsCount || 0} 客户端) 与 ${res.summary.outboundsCount} 个出站`);
         render();
       } else {
         state.migrationPreview = null;
         const certMsg = res.summary?.restoredCertsCount ? `、${res.summary.restoredCertsCount} 张 SSL 证书` : '';
         toast(`🎉 备份迁移完成: 已导入 ${res.summary.inboundsCount} 个入站、${res.summary.outboundsCount} 个出站、${res.summary.rulesCount} 条规则${certMsg}！`);
-        load('migrate');
+        if (res.restarting && res.settings) {
+          const nextPort = res.settings.webPort || window.location.port;
+          const nextBase = (res.settings.webBasePath || '/').replace(/\/+$/, '');
+          setTimeout(() => {
+            window.location.href = `${window.location.protocol}//${window.location.hostname}:${nextPort}${nextBase || ''}/`;
+          }, 1500);
+        } else {
+          load('migrate');
+        }
       }
     }
     else if (action === 'migrate-local-xui') {
       const dbPath = $('#local-xui-path')?.value.trim() || '/etc/x-ui/x-ui.db';
       const mode = $('#migrate-mode')?.value || 'merge';
-      const res = await api(`/api/migrate/3xui?mode=${mode}`, {
+      const clonePanel = Boolean($('#migrate-clone-panel')?.checked);
+      const res = await api(`/api/migrate/3xui?mode=${mode}&clonePanel=${clonePanel}`, {
         method: 'POST',
-        body: JSON.stringify({ source: 'local', dbPath })
+        body: JSON.stringify({ source: 'local', dbPath, clonePanel })
       });
       const certMsg = res.summary?.restoredCertsCount ? `、${res.summary.restoredCertsCount} 张 SSL 证书` : '';
       toast(`🎉 本机备份数据迁移完成: 入站 ${res.summary.inboundsCount} 个，出站 ${res.summary.outboundsCount} 个${certMsg}`);
-      load('migrate');
+      if (res.restarting && res.settings) {
+        const nextPort = res.settings.webPort || window.location.port;
+        const nextBase = (res.settings.webBasePath || '/').replace(/\/+$/, '');
+        setTimeout(() => {
+          window.location.href = `${window.location.protocol}//${window.location.hostname}:${nextPort}${nextBase || ''}/`;
+        }, 1500);
+      } else {
+        load('migrate');
+      }
     }
     else if (action === 'preview-xui-json' || action === 'apply-xui-json') {
       const raw = $('#xui-json-input')?.value.trim();
       if (!raw) { toast('请粘贴配置 JSON 内容', true); return; }
       const mode = $('#migrate-mode')?.value || 'merge';
+      const clonePanel = Boolean($('#migrate-clone-panel')?.checked);
       const dryRun = action === 'preview-xui-json';
-      const res = await api(`/api/migrate/3xui?mode=${mode}&dryRun=${dryRun}`, {
+      const res = await api(`/api/migrate/3xui?mode=${mode}&dryRun=${dryRun}&clonePanel=${clonePanel}`, {
         method: 'POST',
-        body: JSON.stringify({ jsonPayload: raw })
+        body: JSON.stringify({ jsonPayload: raw, clonePanel })
       });
       if (dryRun) {
         state.migrationPreview = res;
@@ -3556,18 +3583,35 @@ document.addEventListener('click', async (e) => {
       if (el) el.value = genRandomAlnum(18, userVal);
     }
     else if (action === 'restore-backup-modal') {
-      openModal('导入恢复面板备份', '粘贴备份 JSON 内容', `
+      openModal('一键导入恢复主控备份 (.tar.gz / .zip / .json)', '支持单文件全量灾备包直接上传恢复全部节点、中转、路由、SSL 证书与原面板配置', `
         <form id="restore-backup-form" class="form-grid">
+          <label class="upload-dropzone wide" for="restore-backup-file">
+            <input type="file" id="restore-backup-file" accept=".tar.gz,.tgz,.gz,.zip,.db,.json" class="hidden">
+            <b style="display:block;font-size:15px;margin-bottom:6px">📁 点击选择或拖拽上传 <code>nexusgate-backup-xxxx.tar.gz</code> 全量备份包</b>
+            <span class="muted" style="font-size:12px" id="restore-file-label">支持单文件 .tar.gz / .zip 灾备包或 .json 备份文件</span>
+          </label>
+          <label class="wide" style="flex-direction:row;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" name="clonePanel" id="restore-clone-panel" style="width:16px;min-height:16px" checked>
+            <span>1:1 完整克隆恢复原主控的访问端口、安全根路径、登录账号密码、订阅安全码与面板绑定域名</span>
+          </label>
           <label class="wide">
-            备份 JSON 内容
-            <textarea name="backupJson" style="min-height:200px" required placeholder='粘贴导出的 nexusgate-backup.json 内容'></textarea>
+            或者直接粘贴备份 JSON 内容 (可选)
+            <textarea name="backupJson" style="min-height:120px" placeholder='若已选择上方 .tar.gz / .zip 备份包则无需填写此处'></textarea>
           </label>
           <div class="form-actions">
             <button type="button" data-close>取消</button>
-            <button type="submit" class="primary">立即恢复备份</button>
+            <button type="submit" class="primary">🚀 立即恢复全量备份</button>
           </div>
         </form>
       `);
+      const rfInput = $('#restore-backup-file');
+      if (rfInput) {
+        rfInput.addEventListener('change', () => {
+          const f = rfInput.files?.[0];
+          const lbl = $('#restore-file-label');
+          if (f && lbl) lbl.textContent = `已选择: ${f.name} (${(f.size / 1024).toFixed(1)} KB)`;
+        });
+      }
     }
   } catch (err) {
     toast(err.message, true);
@@ -3826,10 +3870,37 @@ document.addEventListener('submit', async (e) => {
       showLogin();
     }
     else if (form.id === 'restore-backup-form') {
-      await api('/api/restore', { method: 'POST', body: JSON.stringify({ backup: JSON.parse(data.backupJson) }) });
+      const fileInput = $('#restore-backup-file');
+      const file = fileInput?.files?.[0];
+      const clonePanel = Boolean($('#restore-clone-panel')?.checked);
+      let res;
+      if (file) {
+        const buf = await file.arrayBuffer();
+        res = await api(`/api/restore?clonePanel=${clonePanel}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/octet-stream' },
+          body: buf
+        });
+      } else if (data.backupJson && data.backupJson.trim()) {
+        res = await api(`/api/restore?clonePanel=${clonePanel}`, {
+          method: 'POST',
+          body: JSON.stringify({ backup: JSON.parse(data.backupJson), clonePanel })
+        });
+      } else {
+        throw new Error('请选择要上传的 .tar.gz / .zip 备份包或粘贴 JSON 内容');
+      }
       closeModal();
-      toast('面板备份已恢复！');
-      load('settings');
+      const certMsg = res.restoredCertsCount ? `、${res.restoredCertsCount} 张 SSL 证书` : '';
+      toast(`🎉 全量备份已恢复: ${res.inboundsCount} 个入站 (${res.clientsCount || 0} 客户端)、${res.outboundsCount} 个出站${certMsg}！`);
+      if (res.restarting && res.settings) {
+        const nextPort = res.settings.webPort || window.location.port;
+        const nextBase = (res.settings.webBasePath || '/').replace(/\/+$/, '');
+        setTimeout(() => {
+          window.location.href = `${window.location.protocol}//${window.location.hostname}:${nextPort}${nextBase || ''}/`;
+        }, 1500);
+      } else {
+        load('settings');
+      }
     }
   } catch (err) {
     if (form.id === 'login-form') $('#login-error').textContent = err.message;

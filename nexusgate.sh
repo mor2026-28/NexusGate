@@ -532,43 +532,37 @@ export_panel_backup() {
   need_root
   local date_str
   date_str="$(date +%F)"
-  local json_out="/root/nexusgate-backup-${date_str}.json"
-  local tar_out="/root/nexusgate-backup-${date_str}.tar.gz"
-  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --export-backup "$json_out"
-  local tar_items=()
-  [[ -d /etc/nexusgate ]] && tar_items+=("etc/nexusgate")
-  [[ -d /root/cert ]] && tar_items+=("root/cert")
-  [[ -d /root/.acme.sh ]] && tar_items+=("root/.acme.sh")
-  if [[ ${#tar_items[@]} -gt 0 ]]; then
-    tar -czf "$tar_out" -C / "${tar_items[@]}" 2>/dev/null || true
-    ok "已同步打包完整归档备份包 (含证书目录与 .acme.sh 自动续签): ${tar_out}"
-  fi
-  ok "全量便携备份已完成！可将 ${json_out} 或 ${tar_out} 直接导入任意新服务器自动还原全部节点、转发与 SSL 域名证书。"
+  local tar_out="${1:-/root/nexusgate-backup-${date_str}.tar.gz}"
+  rm -f "/root/nexusgate-backup-${date_str}.json" 2>/dev/null || true
+  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --export-backup "$tar_out"
+  ok "单文件全量主控灾备包已生成: ${tar_out}"
+  info "说明: 节点数据库 (nexusgate.json)、中转与路由规则、所有物理 SSL 证书及 .acme.sh 自动续签脚本已全部统一打包进该 .tar.gz 文件，迁移时只需上传这一个文件即可 1:1 完整恢复！"
 }
 
 migrate_3xui() {
   need_root
+  local arg_path="${1:-}"
   local default_db="/etc/x-ui/x-ui.db"
-  if [[ ! -f "$default_db" ]]; then
-    if [[ -f /root/3xui_backup.tar.gz ]]; then
-      default_db="/root/3xui_backup.tar.gz"
-    else
-      local found_tar=""
-      found_tar="$(ls -1t /root/*.tar.gz /root/*.tgz /root/nexusgate-backup*.json 2>/dev/null | head -n 1 || true)"
-      [[ -n "$found_tar" && -f "$found_tar" ]] && default_db="$found_tar"
-    fi
+  local found_tar=""
+  found_tar="$(ls -1t /root/*.tar.gz /root/*.tgz /root/*.zip /root/nexusgate-backup*.json 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$found_tar" && -f "$found_tar" ]]; then
+    default_db="$found_tar"
+  elif [[ -f /root/3xui_backup.tar.gz ]]; then
+    default_db="/root/3xui_backup.tar.gz"
   fi
-  echo -e "${cyan}支持导入: NexusGate 备份 (.json / .tar.gz) 或 3x-ui / X-Panel 备份 (x-ui.db / .tar.gz)${plain}"
-  local db_path=""
-  read -r -p "请输入备份文件路径 [默认 ${default_db}]: " db_path </dev/tty || true
-  db_path="${db_path:-$default_db}"
+  local db_path="$arg_path"
+  if [[ -z "$db_path" ]]; then
+    echo -e "${cyan}支持单文件一键恢复: NexusGate 全量灾备包 (nexusgate-backup-*.tar.gz) 或 3x-ui 备份包 (3xui_backup.tar.gz / x-ui.db)${plain}"
+    read -r -p "请输入备份文件路径 [默认 ${default_db}]: " db_path </dev/tty || true
+    db_path="${db_path:-$default_db}"
+  fi
   db_path="${db_path%\"}"
   db_path="${db_path#\"}"
   db_path="${db_path%'}"
   db_path="${db_path#'}"
   systemctl stop nexusgate.service nexusgate-singbox.service 2>/dev/null || true
   pkill -9 -f "sing-box run" 2>/dev/null || true
-  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --migrate-3xui "$db_path" merge
+  NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --migrate-3xui "$db_path" replace true
   if [[ -x /root/.acme.sh/acme.sh ]]; then
     /root/.acme.sh/acme.sh --install-cronjob >/dev/null 2>&1 || true
     systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null || true
@@ -577,6 +571,7 @@ migrate_3xui() {
   systemctl reset-failed nexusgate.service nexusgate-singbox.service 2>/dev/null || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
+  show_info
 }
 
 update_panel() {
@@ -729,7 +724,8 @@ if [[ $# -gt 0 ]]; then
     bbr) bbr_menu ;;
     cert|ssl) ssl_cert_menu ;;
     firewall|fw) NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall ;;
-    migrate) migrate_3xui ;;
+    backup) export_panel_backup "${2:-}" ;;
+    restore|migrate) migrate_3xui "${2:-}" ;;
     update) update_panel ;;
     uninstall) uninstall_panel ;;
     *) show_menu ;;

@@ -3,6 +3,8 @@
 const http = require('node:http');
 const https = require('node:https');
 const fs = require('node:fs');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { Store, defaultState } = require('./lib/store');
@@ -103,6 +105,77 @@ function buildPortableBackupState(st = store.state) {
   }
 
   return portable;
+}
+
+
+function copyDirForBackupSync(srcDir, destDir) {
+  if (!fs.existsSync(srcDir)) return;
+  fs.mkdirSync(destDir, { recursive: true });
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    const sPath = path.join(srcDir, entry.name);
+    const dPath = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirForBackupSync(sPath, dPath);
+    } else if (entry.isFile()) {
+      try { fs.copyFileSync(sPath, dPath); } catch { /* ignore */ }
+    }
+  }
+}
+
+function buildPortableBackupArchive(outTarGzPath = "") {
+  const portable = buildPortableBackupState(store.state);
+  const jsonText = JSON.stringify(portable, null, 2);
+  const tmpStage = fs.mkdtempSync(path.join(os.tmpdir(), "ng-backup-stage-"));
+  const tmpTar = outTarGzPath
+    ? (outTarGzPath.endsWith(".json") ? outTarGzPath.replace(/\.json$/i, ".tar.gz") : outTarGzPath)
+    : path.join(os.tmpdir(), `ng-backup-${Date.now()}-${crypto.randomBytes(4).toString("hex")}.tar.gz`);
+
+  try {
+    // 1) Write portable nexusgate.json into archive root, etc/nexusgate/, and var/lib/nexusgate/
+    fs.writeFileSync(path.join(tmpStage, "nexusgate.json"), jsonText, { mode: 0o600 });
+    fs.mkdirSync(path.join(tmpStage, "etc", "nexusgate"), { recursive: true });
+    fs.writeFileSync(path.join(tmpStage, "etc", "nexusgate", "nexusgate.json"), jsonText, { mode: 0o600 });
+    fs.mkdirSync(path.join(tmpStage, "var", "lib", "nexusgate"), { recursive: true });
+    fs.writeFileSync(path.join(tmpStage, "var", "lib", "nexusgate", "nexusgate.json"), jsonText, { mode: 0o600 });
+
+    // 2) Copy existing /etc/nexusgate, /root/cert, and /root/.acme.sh if present
+    try { copyDirForBackupSync("/etc/nexusgate", path.join(tmpStage, "etc", "nexusgate")); } catch { /* ignore */ }
+    try { copyDirForBackupSync("/root/cert", path.join(tmpStage, "root", "cert")); } catch { /* ignore */ }
+    try { copyDirForBackupSync("/root/.acme.sh", path.join(tmpStage, "root", ".acme.sh")); } catch { /* ignore */ }
+
+    // 3) Ensure all embedded PEM certificates are also written as physical files in root/cert/<domain> and etc/nexusgate/certs/<domain>
+    for (const c of portable.certificates || []) {
+      if (c && c.domain && c.certPem && c.keyPem) {
+        const safeDom = String(c.domain).replace(/[^a-zA-Z0-9._-]/g, "");
+        if (!safeDom) continue;
+        for (const baseSub of [path.join(tmpStage, "root", "cert", safeDom), path.join(tmpStage, "etc", "nexusgate", "certs", safeDom)]) {
+          fs.mkdirSync(baseSub, { recursive: true });
+          fs.writeFileSync(path.join(baseSub, "fullchain.pem"), String(c.certPem), { mode: 0o644 });
+          fs.writeFileSync(path.join(baseSub, "privkey.pem"), String(c.keyPem), { mode: 0o600 });
+        }
+      }
+    }
+
+    fs.mkdirSync(path.dirname(path.resolve(tmpTar)), { recursive: true });
+    spawnSync("tar", ["-czf", tmpTar, "-C", tmpStage, "."], { encoding: "utf8", timeout: 20000 });
+
+    // Remove any duplicate standalone .json file in the same directory so only one unified .tar.gz exists
+    if (outTarGzPath) {
+      const legacyJson = tmpTar.replace(/\.(tar\.gz|tgz)$/i, ".json");
+      if (legacyJson !== tmpTar && fs.existsSync(legacyJson)) {
+        try { fs.rmSync(legacyJson, { force: true }); } catch { /* ignore */ }
+      }
+      return { archivePath: tmpTar, portable };
+    }
+
+    const buffer = fs.readFileSync(tmpTar);
+    return { buffer, portable };
+  } finally {
+    try { fs.rmSync(tmpStage, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (!outTarGzPath) {
+      try { fs.rmSync(tmpTar, { force: true }); } catch { /* ignore */ }
+    }
+  }
 }
 
 function getActiveRealCert(st = store.state) {
@@ -583,23 +656,23 @@ function handleCliCommand(args) {
     return;
   }
   if (cmd === '--export-backup') {
-    const outJsonPath = args[1] || `/root/nexusgate-backup-${new Date().toISOString().slice(0, 10)}.json`;
-    const portable = buildPortableBackupState(store.state);
-    fs.mkdirSync(path.dirname(path.resolve(outJsonPath)), { recursive: true });
-    fs.writeFileSync(outJsonPath, JSON.stringify(portable, null, 2), { mode: 0o600 });
+    const outTarPath = args[1] || `/root/nexusgate-backup-${new Date().toISOString().slice(0, 10)}.tar.gz`;
+    const { archivePath, portable } = buildPortableBackupArchive(outTarPath);
     const certsCount = (portable.certificates || []).filter((c) => c.certPem && c.keyPem).length;
-    console.log(`已导出全量便携备份 (含 ${(portable.inbounds || []).length} 个入站, ${(portable.outbounds || []).filter((o) => !o.builtin).length} 个出站, ${certsCount} 张内嵌 SSL 证书与域名配置): ${outJsonPath}`);
+    console.log(`已打包生成单文件全量灾备备份包 (内含 nexusgate.json 全量数据 + ${(portable.inbounds || []).length} 个入站 + ${(portable.outbounds || []).filter((o) => !o.builtin).length} 个出站 + ${certsCount} 张 SSL 域名证书 + ACME 自动续签配置): ${archivePath}`);
     return;
   }
   if (cmd === '--migrate-3xui') {
     const dbPath = args[1] || '/etc/x-ui/x-ui.db';
     const mode = args[2] || 'merge';
+    const cloneArg = args[3] !== 'false';
     const parsed = parse3xuiPayload({ dbPath, dryRun: false });
-    const rec = apply3xuiMigration(store, parsed, mode);
+    const rec = apply3xuiMigration(store, parsed, mode, { clonePanel: cloneArg && Boolean(parsed.isNexusGateBackup) });
     syncDiscoveredCerts(true);
     singbox.writeConfig();
     const certMsg = rec.restoredCertsCount ? `, 恢复证书 ${rec.restoredCertsCount} 张 (${rec.restoredCertDomains.join(', ')})` : '';
-    console.log(`成功从 ${dbPath} 备份迁移: 入站 ${rec.inboundsCount} 个 (${rec.clientsCount} 客户端), 出站 ${rec.outboundsCount} 个, 分流规则 ${rec.rulesCount} 条${certMsg}`);
+    const cloneMsg = (cloneArg && parsed.isNexusGateBackup) ? ` [已 1:1 克隆原面板端口/安全路径/账号密码/订阅码]` : '';
+    console.log(`成功从 ${dbPath} 备份恢复: 入站 ${rec.inboundsCount} 个 (${rec.clientsCount} 客户端), 出站 ${rec.outboundsCount} 个, 分流规则 ${rec.rulesCount} 条${certMsg}${cloneMsg}`);
     return;
   }
 }
@@ -1997,19 +2070,21 @@ async function handleRequest(req, res) {
       let parsed;
       const mode = url.searchParams.get('mode') || 'merge';
       const dryRun = url.searchParams.get('dryRun') === 'true';
+      let clonePanel = url.searchParams.get('clonePanel') === 'true';
 
       if (contentType.includes('application/octet-stream')) {
         const dbBuffer = await readBuffer(req, 64 * 1024 * 1024);
         parsed = parse3xuiPayload({ dbBuffer, dryRun });
       } else {
         const body = await readJson(req);
+        if (body.clonePanel !== undefined) clonePanel = Boolean(body.clonePanel);
         if (body.source === 'local') {
           let localPath = String(body.dbPath || '/etc/x-ui/x-ui.db').trim().replace(/^["']+|["']+$/g, '');
           if (!fs.existsSync(localPath)) {
             const candidates = ['/root/3xui_backup.tar.gz', '/etc/x-ui/x-ui.db'];
             try {
               const rootFiles = fs.readdirSync('/root')
-                .filter((f) => /\.(tar\.gz|tgz|db|json)$/i.test(f))
+                .filter((f) => /\.(tar\.gz|tgz|zip|db|json)$/i.test(f))
                 .map((f) => path.join('/root', f))
                 .sort((a, b) => {
                   try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
@@ -2026,7 +2101,7 @@ async function handleRequest(req, res) {
         } else if (body.jsonPayload) {
           parsed = parse3xuiPayload({ jsonPayload: typeof body.jsonPayload === 'string' ? JSON.parse(body.jsonPayload) : body.jsonPayload, dryRun });
         } else {
-          throw new Error('请上传 x-ui.db / 3xui_backup.tar.gz 备份文件、选择本机路径或粘贴配置 JSON');
+          throw new Error('请上传备份文件 (.tar.gz / .zip / x-ui.db / .json)、选择本机路径或粘贴配置 JSON');
         }
       }
 
@@ -2035,23 +2110,38 @@ async function handleRequest(req, res) {
       }
 
       const prevPanelCert = store.state.settings.webCertFile || '';
-      const record = apply3xuiMigration(store, parsed, mode);
+      const prevPanelPort = store.state.settings.webPort;
+      const prevPanelPath = store.state.settings.webBasePath;
+      const record = apply3xuiMigration(store, parsed, mode, { clonePanel });
       syncDiscoveredCerts(true);
       store.transact(() => store.addAudit(
         session.username,
         'backup_migrate',
         `入站 ${record.inboundsCount} 个 / 出站 ${record.outboundsCount} 个 / 规则 ${record.rulesCount} 条${record.restoredCertsCount ? ` / 证书 ${record.restoredCertsCount} 张` : ''}`
       ));
-      const allPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
+      const allPorts = [
+        store.state.settings.webPort,
+        ...(store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port)
+      ];
       openFirewallPorts(allPorts);
       autoApplyIfEnabled();
-      if (store.state.settings.webCertFile && store.state.settings.webCertFile !== prevPanelCert) {
-        setTimeout(() => restartPanelServer(), 300);
+      const needServerRestart =
+        (store.state.settings.webCertFile && store.state.settings.webCertFile !== prevPanelCert) ||
+        store.state.settings.webPort !== prevPanelPort;
+      if (needServerRestart) {
+        setTimeout(() => restartPanelServer(), 400);
       }
       return sendJson(res, 200, {
         migrated: true,
         record,
-        summary: parsed.summary
+        summary: parsed.summary,
+        clonedPanel: Boolean(clonePanel && parsed.isNexusGateBackup),
+        settings: {
+          webPort: store.state.settings.webPort,
+          webBasePath: store.state.settings.webBasePath,
+          webDomain: store.state.settings.webDomain
+        },
+        restarting: needServerRestart || store.state.settings.webBasePath !== prevPanelPath
       });
     }
 
@@ -2365,39 +2455,81 @@ async function handleRequest(req, res) {
 
     // 15. Backup & Restore
     if (pathname === '/api/backup' && method === 'GET') {
+      const format = url.searchParams.get('format') || 'json';
+      const dateStr = new Date().toISOString().slice(0, 10);
+      if (format === 'targz' || format === 'archive') {
+        const { buffer } = buildPortableBackupArchive();
+        res.writeHead(200, {
+          'content-type': 'application/gzip',
+          'content-length': buffer.length,
+          'content-disposition': `attachment; filename="nexusgate-backup-${dateStr}.tar.gz"`
+        });
+        res.end(buffer);
+        return;
+      }
       const portable = buildPortableBackupState(store.state);
       const payload = JSON.stringify(portable, null, 2);
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
-        'content-disposition': `attachment; filename="nexusgate-backup-${new Date().toISOString().slice(0, 10)}.json"`
+        'content-disposition': `attachment; filename="nexusgate-backup-${dateStr}.json"`
       });
       res.end(payload);
       return;
     }
 
     if (pathname === '/api/restore' && method === 'POST') {
-      const body = await readJson(req);
-      const data = body.backup || body;
-      if (!data || (!Array.isArray(data.inbounds) && !Array.isArray(data.certificates))) {
-        return sendError(res, 400, '备份文件结构无效');
+      const contentType = String(req.headers['content-type'] || '');
+      let parsed;
+      let clonePanel = url.searchParams.get('clonePanel') === 'true';
+
+      if (contentType.includes('application/octet-stream')) {
+        const dbBuffer = await readBuffer(req, 64 * 1024 * 1024);
+        parsed = parse3xuiPayload({ dbBuffer, dryRun: false });
+      } else {
+        const body = await readJson(req);
+        if (body.clonePanel !== undefined) clonePanel = Boolean(body.clonePanel);
+        const data = body.backup || body;
+        if (!data || (!Array.isArray(data.inbounds) && !Array.isArray(data.certificates))) {
+          return sendError(res, 400, '备份文件结构无效');
+        }
+        parsed = parse3xuiPayload({ jsonPayload: data, dryRun: false });
       }
-      const parsed = parse3xuiPayload({ jsonPayload: data, dryRun: false });
-      const rec = apply3xuiMigration(store, parsed, 'replace');
+
+      const prevPanelCert = store.state.settings.webCertFile || '';
+      const prevPanelPort = store.state.settings.webPort;
+      const prevPanelPath = store.state.settings.webBasePath;
+      const rec = apply3xuiMigration(store, parsed, 'replace', { clonePanel });
       store.transact((st) => {
-        if (data.dns) st.dns = data.dns;
         syncRoutingRulesToInbounds(st);
         store.addAudit(session.username, 'restore_backup', `恢复 ${rec.inboundsCount} 个入站 (${rec.clientsCount} 客户端), ${rec.restoredCertsCount || 0} 张证书`);
       });
       syncDiscoveredCerts(true);
-      const restoredPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
+      const restoredPorts = [
+        store.state.settings.webPort,
+        ...(store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port)
+      ];
+      openFirewallPorts(restoredPorts);
       autoApplyIfEnabled(restoredPorts);
+      const needServerRestart =
+        (store.state.settings.webCertFile && store.state.settings.webCertFile !== prevPanelCert) ||
+        store.state.settings.webPort !== prevPanelPort;
+      if (needServerRestart) {
+        setTimeout(() => restartPanelServer(), 400);
+      }
       return sendJson(res, 200, {
         ok: true,
         inboundsCount: store.state.inbounds.length,
         clientsCount: rec.clientsCount,
         outboundsCount: store.state.outbounds.filter((o) => !o.builtin).length,
         restoredCertsCount: rec.restoredCertsCount || 0,
-        restoredCertDomains: rec.restoredCertDomains || []
+        restoredCertDomains: rec.restoredCertDomains || [],
+        clonedPanel: Boolean(clonePanel && parsed.isNexusGateBackup),
+        settings: {
+          webPort: store.state.settings.webPort,
+          webBasePath: store.state.settings.webBasePath,
+          webDomain: store.state.settings.webDomain
+        },
+        restarting: needServerRestart || store.state.settings.webBasePath !== prevPanelPath
       });
     }
 
